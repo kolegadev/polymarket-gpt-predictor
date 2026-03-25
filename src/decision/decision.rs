@@ -2,25 +2,27 @@ use crate::decision::candle::Candle;
 use crate::decision::features::Features;
 use crate::decision::state::{State, Decision};
 
-/// Thresholds — can be made configurable later.
+/// Thresholds — tuned for higher signal rate on real BTC data.
+/// The ChatGPT defaults were too strict; these are relaxed while keeping
+/// the core regime logic intact.
 pub struct Thresholds {
-    pub bull_spread: f64,    // 0.10
+    pub bull_spread: f64,    // 0.10 (ATR-norm, most bars exceed this)
     pub bull_slope: f64,     // 0.08
     pub bull_slope99: f64,   // -0.03
-    pub bull_score_min: u32, // 4
+    pub bull_score_min: u32, // 4 → 3
     pub bear_spread: f64,    // -0.10
     pub bear_slope: f64,     // -0.08
-    pub bear_score_min: u32, // 4
+    pub bear_score_min: u32, // 4 → 3
     pub bull_warnings_max: u32, // 2 triggers exit
-    pub yes_close_pos: f64,  // 0.50
-    pub yes_dist_max: f64,   // 1.40
-    pub yes_range_max: f64,  // 1.80
-    pub yes_wick_max: f64,   // 0.35
-    pub no_close_pos: f64,   // 0.35
-    pub no_upper_wick_min: f64, // 0.20
-    pub no_lower_wick_max: f64, // 0.30
-    pub no_dist_max: f64,    // 1.20
-    pub no_ma_tolerance: f64, // 0.10
+    pub yes_close_pos: f64,  // 0.50 → 0.40
+    pub yes_dist_max: f64,   // 1.40 → 2.00
+    pub yes_range_max: f64,  // 1.80 → 3.00
+    pub yes_wick_max: f64,   // 0.35 → 0.45
+    pub no_close_pos: f64,   // 0.35 → 0.45
+    pub no_upper_wick_min: f64, // 0.20 → 0.10
+    pub no_lower_wick_max: f64, // 0.30 → 0.45
+    pub no_dist_max: f64,    // 1.20 → 2.00
+    pub no_ma_tolerance: f64, // 0.10 → 0.20
 }
 
 impl Default for Thresholds {
@@ -29,25 +31,25 @@ impl Default for Thresholds {
             bull_spread: 0.10,
             bull_slope: 0.08,
             bull_slope99: -0.03,
-            bull_score_min: 4,
+            bull_score_min: 3,
             bear_spread: -0.10,
             bear_slope: -0.08,
-            bear_score_min: 4,
+            bear_score_min: 3,
             bull_warnings_max: 2,
-            yes_close_pos: 0.50,
-            yes_dist_max: 1.40,
-            yes_range_max: 1.80,
-            yes_wick_max: 0.35,
-            no_close_pos: 0.35,
-            no_upper_wick_min: 0.20,
-            no_lower_wick_max: 0.30,
-            no_dist_max: 1.20,
-            no_ma_tolerance: 0.10,
+            yes_close_pos: 0.40,
+            yes_dist_max: 2.00,
+            yes_range_max: 3.00,
+            yes_wick_max: 0.45,
+            no_close_pos: 0.45,
+            no_upper_wick_min: 0.10,
+            no_lower_wick_max: 0.45,
+            no_dist_max: 2.00,
+            no_ma_tolerance: 0.20,
         }
     }
 }
 
-fn bull_candidate(c: &Candle, f: &Features, th: &Thresholds) -> bool {
+pub fn bull_candidate(c: &Candle, f: &Features, th: &Thresholds) -> bool {
     f.sma7 > f.sma25
         && f.sma25 > f.sma99
         && f.spread_7_25 >= th.bull_spread
@@ -68,7 +70,7 @@ pub fn bull_score(candles: &[Candle], t: usize, f: &Features) -> u32 {
     s
 }
 
-fn bear_candidate(c: &Candle, f: &Features, th: &Thresholds) -> bool {
+pub fn bear_candidate(c: &Candle, f: &Features, th: &Thresholds) -> bool {
     f.sma7 < f.sma25
         && f.sma25 < f.sma99
         && f.spread_7_25 <= th.bear_spread
@@ -89,7 +91,7 @@ pub fn bear_score(candles: &[Candle], t: usize, f: &Features) -> u32 {
     s
 }
 
-fn bull_warnings(candles: &[Candle], t: usize, f: &Features, prev_f: &Features, prev2_f: &Features) -> u32 {
+pub fn bull_warnings(candles: &[Candle], t: usize, f: &Features, prev_f: &Features, prev2_f: &Features) -> u32 {
     let c = &candles[t];
     let mut w = 0u32;
     if c.close < f.sma7 { w += 1; }
@@ -100,7 +102,7 @@ fn bull_warnings(candles: &[Candle], t: usize, f: &Features, prev_f: &Features, 
     w
 }
 
-fn bull_yes_filter(f: &Features, th: &Thresholds) -> bool {
+pub fn bull_yes_filter(f: &Features, th: &Thresholds) -> bool {
     let rng_safe = if f.range < 1e-12 { 1e-12 } else { f.range };
     f.close_pos >= th.yes_close_pos
         && f.dist_close_25 <= th.yes_dist_max
@@ -108,7 +110,7 @@ fn bull_yes_filter(f: &Features, th: &Thresholds) -> bool {
         && (f.upper_wick / rng_safe) <= th.yes_wick_max
 }
 
-fn bear_no_filter(candles: &[Candle], t: usize, f: &Features, th: &Thresholds) -> bool {
+pub fn bear_no_filter(candles: &[Candle], t: usize, f: &Features, th: &Thresholds) -> bool {
     let c = &candles[t];
     let rng_safe = if f.range < 1e-12 { 1e-12 } else { f.range };
     c.high >= f.sma7 - th.no_ma_tolerance * f.atr

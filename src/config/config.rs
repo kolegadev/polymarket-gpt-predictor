@@ -20,6 +20,10 @@ pub struct Args {
     #[arg(long)]
     pub bootstrap: bool,
 
+    /// Run diagnostics on historical data
+    #[arg(long)]
+    pub diagnose: bool,
+
     /// Simulate mode: run on historical data from DB
     #[arg(long)]
     pub simulate: bool,

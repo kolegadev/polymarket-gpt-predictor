@@ -1,5 +1,6 @@
 use anyhow::Result;
 use tracing::info;
+use rusqlite::params;
 use std::sync::Arc;
 use crate::decision::state::{State, Decision};
 use crate::db::Db;
@@ -70,49 +71,65 @@ impl PaperTracker {
         Ok(())
     }
 
-    /// Resolve any unresolved trades using the actual close price.
-    pub fn resolve_trades(&self, close_price: f64) -> Result<usize> {
-        let trades = self.db.get_unresolved_trades()?;
-        let mut resolved = 0;
+    /// Resolve a specific trade by its block open time.
+    pub fn resolve_trade_by_block(&self, block_open_time: i64, close_price: f64) -> Result<Option<(String, f64)>> {
+        let conn = self.db.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT id, decision, open_odds_yes, open_odds_no, reference_price
+             FROM paper_trades WHERE block_open_time = ?1 AND outcome IS NULL"
+        )?;
+        let rows: Vec<_> = stmt.query_map(params![block_open_time], |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, Option<f64>>(2)?,
+                row.get::<_, Option<f64>>(3)?,
+                row.get::<_, f64>(4)?,
+            ))
+        })?.flatten().collect();
 
-        for trade in &trades {
-            // Determine outcome: YES wins if close > open (Up), NO wins if close < open (Down)
-            let went_up = close_price > trade.reference_price;
-            let went_down = close_price < trade.reference_price;
+        if rows.is_empty() {
+            info!("No unresolved trade for block {}", block_open_time);
+            return Ok(None);
+        }
 
-            let (outcome, pnl) = match trade.decision.as_str() {
-                "YES" => {
+        for (id, decision, odds_yes, odds_no, ref_price) in rows {
+            let went_up = close_price > ref_price;
+            let went_down = close_price < ref_price;
+            info!("Resolving trade {}: dec={} ref={:.2} close={:.2} up={} down={}", id, decision, ref_price, close_price, went_up, went_down);
+
+            let (outcome, pnl) = match decision.as_str() {
+                "YES" | "Yes" => {
                     if went_up {
-                        let profit = trade.open_odds_yes.unwrap_or(0.50); // payout at odds
-                        ("WIN".to_string(), profit - 1.0) // net: win odds - 1
+                        let payout = odds_yes.unwrap_or(0.50);
+                        ("WIN".to_string(), payout)
                     } else if went_down {
-                        ("LOSS".to_string(), -1.0) // lose stake
+                        ("LOSS".to_string(), -1.0)
                     } else {
-                        // Doji — push, return stake
                         ("PUSH".to_string(), 0.0)
                     }
                 }
-                "NO" => {
+                "NO" | "No" => {
                     if went_down {
-                        let profit = trade.open_odds_no.unwrap_or(0.50);
-                        ("WIN".to_string(), profit - 1.0)
+                        let payout = odds_no.unwrap_or(0.50);
+                        ("WIN".to_string(), payout)
                     } else if went_up {
                         ("LOSS".to_string(), -1.0)
                     } else {
                         ("PUSH".to_string(), 0.0)
                     }
                 }
-                _ => continue, // SKIP trades don't need resolution
+                _ => continue,
             };
 
-            self.db.update_trade_outcome(trade.id, &outcome, pnl, close_price)?;
-            resolved += 1;
+            let rows_updated = conn.execute(
+                "UPDATE paper_trades SET outcome = ?1, pnl = ?2, resolution_price = ?3 WHERE id = ?4",
+                params![outcome, pnl, close_price, id],
+            )?;
+            info!("✅ Resolved trade {}: {} pnl={:.4} rows_updated={}", id, outcome, pnl, rows_updated);
+            return Ok(Some((outcome, pnl)));
         }
-
-        if resolved > 0 {
-            info!("Resolved {} paper trades with close_price={:.2}", resolved, close_price);
-        }
-        Ok(resolved)
+        Ok(None)
     }
 
     /// Print a summary of paper trade performance.

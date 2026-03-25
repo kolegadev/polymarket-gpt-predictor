@@ -57,8 +57,11 @@ impl ClobClient {
     /// Fetch opening odds for a BTC 15m UpDown market.
     /// condition_id is the PolyMarket condition slug (e.g. "btc-15m-updown").
     /// We need to look up the token_id from the condition.
-    pub async fn get_btc_15m_opening_odds(&self, condition_slug: &str) -> Result<(f64, f64)> {
-        // Query the Gamma API for the market
+    pub async fn get_btc_15m_opening_odds(&self, block_open_time_secs: i64) -> Result<(f64, f64)> {
+        // PolyMarket BTC 15m UpDown slug format: btc-updown-15m-{block_timestamp}
+        // where block_timestamp is the Unix epoch in seconds
+        let condition_slug = format!("btc-updown-15m-{}", block_open_time_secs);
+
         let gamma_url = format!(
             "https://gamma-api.polymarket.com/markets?slug={}&closed=false&limit=1",
             condition_slug
@@ -97,11 +100,9 @@ impl ClobClient {
         Ok((yes_odds, no_odds))
     }
 
-    /// Simplified: get odds by querying the CLOB book directly with known token IDs.
-    /// Token IDs for BTC 15m markets change per block — we'll look them up dynamically.
-    pub async fn get_odds_for_block(&self, _block_open_time: i64) -> Result<(f64, f64)> {
-        // V1: Use Gamma API slug lookup
-        // The slug for BTC 15m is typically something like "will-btc-price-go-up-in-the-next-15-minutes"
-        self.get_btc_15m_opening_odds("will-bitcoin-price-go-up-or-down-in-the-next-15-minutes").await
+    /// Get odds for a specific 15m block using its open time.
+    pub async fn get_odds_for_block(&self, block_open_time_ms: i64) -> Result<(f64, f64)> {
+        let block_open_time_secs = block_open_time_ms / 1000;
+        self.get_btc_15m_opening_odds(block_open_time_secs).await
     }
 }

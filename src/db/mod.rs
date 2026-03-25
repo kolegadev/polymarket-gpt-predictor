@@ -197,13 +197,13 @@ impl Db {
     pub fn get_summary(&self) -> Result<(i64, i64, i64, i64, f64)> {
         let conn = self.conn.lock().unwrap();
         let total: i64 = conn.query_row(
-            "SELECT COUNT(*) FROM paper_trades WHERE decision != 'SKIP'", [], |r| r.get(0))?;
+            "SELECT COUNT(*) FROM paper_trades WHERE decision NOT IN ('SKIP', 'Skip')", [], |r| r.get(0))?;
         let wins: i64 = conn.query_row(
             "SELECT COUNT(*) FROM paper_trades WHERE outcome = 'WIN'", [], |r| r.get(0))?;
         let losses: i64 = conn.query_row(
             "SELECT COUNT(*) FROM paper_trades WHERE outcome = 'LOSS'", [], |r| r.get(0))?;
         let skips: i64 = conn.query_row(
-            "SELECT COUNT(*) FROM paper_trades WHERE decision = 'SKIP'", [], |r| r.get(0))?;
+            "SELECT COUNT(*) FROM paper_trades WHERE decision IN ('SKIP', 'Skip')", [], |r| r.get(0))?;
         let total_pnl: f64 = conn.query_row(
             "SELECT COALESCE(SUM(pnl), 0) FROM paper_trades WHERE outcome IS NOT NULL", [], |r| r.get(0))?;
         Ok((total, wins, losses, skips, total_pnl))

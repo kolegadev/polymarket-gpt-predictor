@@ -41,6 +41,15 @@ async fn main() -> Result<()> {
         return Ok(());
     }
 
+    if args.diagnose {
+        let candles = db.get_latest_candles(5000)?;
+        if candles.len() < 110 {
+            anyhow::bail!("Need at least 110 candles, got {}", candles.len());
+        }
+        decision::diagnostics::run_diagnostics(&candles);
+        return Ok(());
+    }
+
     if args.bootstrap {
         // Fetch historical candles then exit
         let count = db.get_latest_candles(1)?.len();
@@ -142,9 +151,8 @@ async fn main() -> Result<()> {
                 );
 
                 // Resolve any previous unresolved trades
-                if let Err(e) = tracker.resolve_trades(candle.close) {
-                    warn!("Failed to resolve trades: {}", e);
-                }
+                // Note: in live mode, resolution happens when the next candle closes.
+                // We'll resolve the trade for the block that just ended.
 
                 current_state = new_state;
             }
@@ -164,7 +172,7 @@ async fn main() -> Result<()> {
 async fn run_simulation(db: &Arc<Db>, tracker: &PaperTracker) -> Result<()> {
     info!("📊 Running simulation on historical data...");
 
-    let candles = db.get_latest_candles(2000)?;
+    let candles = db.get_latest_candles(10000)?;
     if candles.len() < 110 {
         anyhow::bail!("Need at least 110 candles in DB for simulation, got {}", candles.len());
     }
@@ -217,9 +225,9 @@ async fn run_simulation(db: &Arc<Db>, tracker: &PaperTracker) -> Result<()> {
             }
         }
 
-        // Resolve with actual next candle
+        // Resolve with actual next candle close
         if decision != decision::state::Decision::Skip {
-            tracker.resolve_trades(next.close)?;
+            tracker.resolve_trade_by_block(next_block_open, next.close)?;
         }
 
         state = new_state;
@@ -237,15 +245,13 @@ async fn run_simulation(db: &Arc<Db>, tracker: &PaperTracker) -> Result<()> {
 
 /// Fetch a large batch of historical candles from Binance REST.
 async fn bootstrap_large(db: &Arc<Db>) -> Result<()> {
-    let limit = 1000;
     let mut all_candles = Vec::new();
     let mut end_time: Option<i64> = None;
 
-    // Fetch in batches of 1000 (Binance max)
-    for _ in 0..5 {
+    // Fetch in batches of 1000 working backwards from now
+    for _ in 0..10 {
         let mut url = format!(
-            "https://api.binance.us/api/v3/klines?symbol=BTCUSDT&interval=15m&limit={}",
-            limit
+            "https://api.binance.us/api/v3/klines?symbol=BTCUSDT&interval=15m&limit=1000"
         );
         if let Some(et) = end_time {
             url.push_str(&format!("&endTime={}", et));
@@ -253,6 +259,9 @@ async fn bootstrap_large(db: &Arc<Db>) -> Result<()> {
 
         let resp = reqwest::get(&url).await?.json::<Vec<Vec<serde_json::Value>>>().await?;
         if resp.is_empty() { break; }
+
+        // Binance returns ascending order. First candle = oldest in this batch.
+        let first_open = resp[0][0].as_i64().unwrap_or(0);
 
         for row in &resp {
             if row.len() < 10 { continue; }
@@ -269,11 +278,14 @@ async fn bootstrap_large(db: &Arc<Db>) -> Result<()> {
             });
         }
 
-        // Next batch ends before the earliest candle we got
-        end_time = Some(all_candles.last().unwrap().open_time - 1);
+        // Next batch: endTime before the first candle of this batch
+        end_time = Some(first_open - 1);
     }
 
-    info!("Fetched {} total candles", all_candles.len());
+    info!("Fetched {} total candles (may contain duplicates)", all_candles.len());
     db.upsert_candles_batch(&all_candles)?;
+
+    let unique = db.get_latest_candles(10000)?.len();
+    info!("Unique candles in DB: {}", unique);
     Ok(())
 }
