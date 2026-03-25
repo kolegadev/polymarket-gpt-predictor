@@ -1,108 +1,96 @@
 use anyhow::Result;
 use reqwest::Client;
 use serde::Deserialize;
-use tracing::info;
+use tracing::{info, warn};
 
-/// PolyMarket Gamma API CLOB client (read-only for paper trading).
-pub struct ClobClient {
+/// PolyMarket Gamma API client — fetches real odds for BTC 15m UpDown markets.
+pub struct GammaClient {
     client: Client,
-    base_url: String,
 }
 
-/// Best bid/ask from the CLOB order book.
 #[derive(Debug, Clone)]
-pub struct OrderBookPrices {
-    pub best_bid: f64,
-    pub best_ask: f64,
-    pub mid: f64,
+pub struct MarketOdds {
+    pub yes_price: f64,   // Up price (YES)
+    pub no_price: f64,    // Down price (NO)
+    pub yes_best_bid: f64,
+    pub yes_best_ask: f64,
+    pub no_best_bid: f64,
+    pub no_best_ask: f64,
+    pub spread: f64,
+    pub slug: String,
+    pub fetched_at_ms: i64,
 }
 
 #[derive(Debug, Deserialize)]
-struct BookResponse {
-    bids: Vec<Vec<String>>,
-    asks: Vec<Vec<String>>,
+struct MarketResponse {
+    slug: String,
+    outcome_prices: Vec<String>,
+    clob_token_ids: Vec<String>,
+    best_bid: Option<f64>,
+    best_ask: Option<f64>,
+    spread: Option<f64>,
+    outcomes: Option<Vec<String>>,
+    accepting_orders: Option<bool>,
+    volume: Option<String>,
 }
 
-impl ClobClient {
+impl GammaClient {
     pub fn new() -> Self {
-        Self {
-            client: Client::new(),
-            base_url: "https://clob.polymarket.com".to_string(),
-        }
+        Self { client: Client::new() }
     }
 
-    /// Fetch the best bid/ask for a given token ID.
-    /// Returns odds (0.0 to 1.0) where YES odds = 1 - NO odds.
-    pub async fn get_best_prices(&self, token_id: &str) -> Result<OrderBookPrices> {
-        let url = format!("{}/book?token_id={}", self.base_url, token_id);
-        let resp: BookResponse = self.client.get(&url).send().await?.json().await?;
+    /// Fetch odds for a specific 15m block.
+    /// block_open_time_ms: the open_time of the 15m block in milliseconds.
+    /// Tries to hit as close to t=0 as possible.
+    pub async fn get_odds(&self, block_open_time_ms: i64) -> Result<MarketOdds> {
+        let block_secs = block_open_time_ms / 1000;
+        let slug = format!("btc-updown-15m-{}", block_secs);
 
-        let best_bid = resp.bids
-            .first()
-            .and_then(|b| b.first())
-            .and_then(|p| p.parse::<f64>().ok())
-            .unwrap_or(0.0);
-
-        let best_ask = resp.asks
-            .first()
-            .and_then(|a| a.first())
-            .and_then(|p| p.parse::<f64>().ok())
-            .unwrap_or(0.0);
-
-        let mid = (best_bid + best_ask) / 2.0;
-
-        Ok(OrderBookPrices { best_bid, best_ask, mid })
-    }
-
-    /// Fetch opening odds for a BTC 15m UpDown market.
-    /// condition_id is the PolyMarket condition slug (e.g. "btc-15m-updown").
-    /// We need to look up the token_id from the condition.
-    pub async fn get_btc_15m_opening_odds(&self, block_open_time_secs: i64) -> Result<(f64, f64)> {
-        // PolyMarket BTC 15m UpDown slug format: btc-updown-15m-{block_timestamp}
-        // where block_timestamp is the Unix epoch in seconds
-        let condition_slug = format!("btc-updown-15m-{}", block_open_time_secs);
-
-        let gamma_url = format!(
+        let url = format!(
             "https://gamma-api.polymarket.com/markets?slug={}&closed=false&limit=1",
-            condition_slug
+            slug
         );
 
-        #[derive(Deserialize)]
-        struct MarketResponse {
-            id: String,
-            tokens: Vec<TokenInfo>,
-        }
-
-        #[derive(Deserialize)]
-        struct TokenInfo {
-            token_id: String,
-            outcome: String,
-        }
-
-        let resp: Vec<MarketResponse> = self.client.get(&gamma_url).send().await?.json().await?;
+        let start = chrono::Utc::now().timestamp_millis();
+        let resp: Vec<MarketResponse> = self.client.get(&url)
+            .timeout(std::time::Duration::from_secs(3))
+            .send().await?
+            .json().await?;
+        let elapsed = chrono::Utc::now().timestamp_millis() - start;
 
         let market = resp.first()
-            .ok_or_else(|| anyhow::anyhow!("No active market found for {}", condition_slug))?;
+            .filter(|m| m.accepting_orders.unwrap_or(false))
+            .ok_or_else(|| anyhow::anyhow!("No active market for block {}", block_secs))?;
 
-        let mut yes_odds = 0.5;
-        let mut no_odds = 0.5;
+        // outcomePrices: ["Up_price", "Down_price"]
+        let yes_price = market.outcome_prices.first()
+            .and_then(|s| s.parse::<f64>().ok())
+            .unwrap_or(0.505);
+        let no_price = market.outcome_prices.get(1)
+            .and_then(|s| s.parse::<f64>().ok())
+            .unwrap_or(0.495);
 
-        for token in &market.tokens {
-            let prices = self.get_best_prices(&token.token_id).await?;
-            match token.outcome.as_str() {
-                "Up" => yes_odds = prices.mid,
-                "Down" => no_odds = prices.mid,
-                _ => {}
-            }
-        }
+        // bestBid/bestAsk are for the first (YES/Up) token
+        // NO token is the inverse: NO_bid = 1 - YES_ask, NO_ask = 1 - YES_bid
+        let yes_bid = market.best_bid.unwrap_or(yes_price - 0.005);
+        let yes_ask = market.best_ask.unwrap_or(yes_price + 0.005);
+        let no_bid = 1.0 - yes_ask;
+        let no_ask = 1.0 - yes_bid;
 
-        info!("CLOB odds — YES(Up): {:.4}, NO(Down): {:.4}", yes_odds, no_odds);
-        Ok((yes_odds, no_odds))
-    }
+        let spread = market.spread.unwrap_or(yes_ask - yes_bid);
 
-    /// Get odds for a specific 15m block using its open time.
-    pub async fn get_odds_for_block(&self, block_open_time_ms: i64) -> Result<(f64, f64)> {
-        let block_open_time_secs = block_open_time_ms / 1000;
-        self.get_btc_15m_opening_odds(block_open_time_secs).await
+        info!(
+            "CLOB [{:.0}ms] slug={} YES={:.3} NO_bid={:.3} NO_ask={:.3} spread={:.3}",
+            elapsed, slug, yes_price, no_bid, no_ask, spread,
+        );
+
+        Ok(MarketOdds {
+            yes_price, no_price,
+            yes_best_bid: yes_bid, yes_best_ask: yes_ask,
+            no_best_bid: no_bid, no_best_ask: no_ask,
+            spread,
+            slug,
+            fetched_at_ms: start,
+        })
     }
 }

@@ -15,6 +15,7 @@ use paper::tracker::{PaperTracker, KellySizer};
 use binance::feed::FeedEvent;
 use crate::config::config::Args;
 use crate::decision::decision::Thresholds;
+use crate::clob::clob::GammaClient;
 
 const STARTING_BALANCE: f64 = 10_000.00;
 const MAX_BET_PCT: f64 = 0.05;       // 5% of current balance
@@ -61,12 +62,13 @@ async fn main() -> Result<()> {
     info!("║     Kelly sizing | Max 5% per bet | Bal: ${:.2}              ║", tracker.kelly.balance);
     info!("╚══════════════════════════════════════════════════════════════╝");
 
+    let gamma = GammaClient::new();
     let mut rx = binance::feed::spawn_feed(db.clone()).await?;
 
     let mut in_bear = false;
     let mut consecutive_bear = 0u32;
-    let mut pending_stake: f64 = 0.0;
-    let mut pending_block: i64 = 0;
+    let mut current_stake: f64 = 0.0;
+    let mut current_odds: f64 = DEFAULT_ODDS;
 
     // Print summary every 96 bars (~24h)
     let mut bar_count = 0u32;
@@ -83,6 +85,24 @@ async fn main() -> Result<()> {
         match event {
             FeedEvent::Closed(candle) => {
                 bar_count += 1;
+
+                // First: resolve the trade for the block that just closed
+                // (this was placed ~15min ago for this block)
+                let stake_to_resolve = current_stake;
+                if current_stake > 0.0 {
+                    match tracker.resolve_trade_by_block(
+                        candle.open_time, candle.close, stake_to_resolve, current_odds,
+                    ) {
+                        Ok(Some((outcome, _pnl))) => {
+                            info!("  RESOLVED block={}: {} bal={:.2}",
+                                candle.open_time, outcome, tracker.kelly.balance);
+                        }
+                        Ok(None) => {}
+                        Err(e) => warn!("Resolve error: {}", e),
+                    }
+                }
+
+                // Then: evaluate regime and prepare bet for NEXT block
                 let candles = db.get_latest_candles(20)?;
                 if candles.len() < 10 { continue; }
 
@@ -91,75 +111,57 @@ async fn main() -> Result<()> {
                     &candles, t, in_bear, consecutive_bear, &th,
                 );
 
-                // Detect BEAR entry — prepare bet for next block
                 if !in_bear && still_bear && consec >= th.confirm_bars {
-                    // Calculate Kelly stake
-                    let win_prob = 0.57; // from backtest
-                    let stake = tracker.kelly.size(win_prob, DEFAULT_ODDS);
-                    if stake > 0.01 {
-                        info!("🐻 BEAR ACTIVATED | ratio={:.3} consec={} kelly_stake=${:.2}", ratio, consec, stake);
-                        pending_stake = stake;
-                        pending_block = candle.open_time + 900_000; // next block
-                    }
+                    info!("BEAR ACTIVATED | ratio={:.3} consec={}", ratio, consec);
                 }
-
-                // Detect BEAR exit
                 if in_bear && !still_bear && consec == 0 {
-                    info!("📈 BEAR EXITED | ratio={:.3}", ratio);
+                    info!("BEAR EXITED | ratio={:.3}", ratio);
                 }
 
                 in_bear = still_bear;
                 consecutive_bear = consec;
 
-                // Resolve previous block's trade
-                if pending_block > 0 && pending_stake > 0.0 {
-                    // The block that just closed IS the pending block
-                    // Its open_time was candle.open_time
-                    // But pending_block was set to the NEXT block's open_time
-                    // We need to resolve when that block closes
-                    // Actually, let's resolve the block that matches pending_block
-                    // which is the block we placed the bet for
-
-                    // The pending_block is the open_time of the bar we bet on
-                    // candle.open_time is the bar that just closed
-                    // If candle.open_time == pending_block, this is our bet
-                    if candle.open_time == pending_block {
-                        match tracker.resolve_trade_by_block(pending_block, candle.close, pending_stake, DEFAULT_ODDS) {
-                            Ok(Some((outcome, pnl))) => {
-                                info!("  ✅ {} stake=${:.2} pnl={:+.2} bal={:.2} close={:.2}",
-                                    outcome, pending_stake, pnl, tracker.kelly.balance, candle.close);
-                            }
-                            Ok(None) => {
-                                warn!("  ⚠️ No trade found to resolve for block {}", pending_block);
-                            }
-                            Err(e) => {
-                                warn!("  ⚠️ Resolve error: {}", e);
-                            }
-                        }
-                        pending_stake = 0.0;
-                        pending_block = 0;
-                    }
-                }
-
-                // Place bet for next block if in BEAR
                 if in_bear {
-                    let win_prob = 0.57;
-                    let stake = tracker.kelly.size(win_prob, DEFAULT_ODDS);
-                    if stake > 0.01 {
-                        let next_block = candle.open_time + 900_000;
-                        pending_stake = stake;
-                        pending_block = next_block;
+                    let next_block_open = candle.open_time + 900_000;
 
-                        let _ = tracker.record_bet(
-                            next_block,
-                            next_block + 899_999,
+                    // Fetch CLOB odds for the next block
+                    let odds = match tokio::time::timeout(
+                        tokio::time::Duration::from_secs(3),
+                        gamma.get_odds(next_block_open)
+                    ).await {
+                        Ok(Ok(market_odds)) => market_odds.no_best_ask, // pay the ask for NO
+                        Ok(Err(e)) => {
+                            warn!("CLOB error: {}, using default odds", e);
+                            DEFAULT_ODDS
+                        }
+                        Err(_) => {
+                            warn!("CLOB timeout, using default odds");
+                            DEFAULT_ODDS
+                        }
+                    };
+
+                    // Kelly size with real odds and backtested win rate
+                    let win_prob = 0.57;
+                    let stake = tracker.kelly.size(win_prob, odds);
+                    if stake > 0.01 {
+                        tracker.record_bet(
+                            next_block_open,
+                            next_block_open + 899_999,
                             candle.close,
                             "NO",
-                            Some(DEFAULT_ODDS),
+                            Some(odds),
                             ratio,
                             stake,
-                        );
+                        )?;
+
+                        // Store for resolution on next candle close
+                        current_stake = stake;
+                        current_odds = odds;
+                    } else {
+                        current_stake = 0.0;
                     }
+                } else {
+                    current_stake = 0.0;
                 }
 
                 // Periodic summary
