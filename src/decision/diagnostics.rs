@@ -1,181 +1,221 @@
-/// Diagnostic pass: run features on all bars and log distribution stats
-/// to understand where the filter chain is too aggressive.
+/// BULL signal search: test various momentum/buy-pressure indicators for BULL edge.
 use crate::decision::candle::Candle;
-use crate::decision::features;
-use crate::decision::state::State;
-use crate::decision::decision::{self, Thresholds, bull_candidate, bear_candidate, bull_score, bear_score, bull_yes_filter, bear_no_filter, bull_warnings};
+
+fn taker_ratio(candles: &[Candle], t: usize, lookback: usize) -> f64 {
+    let start = t.saturating_sub(lookback - 1);
+    let mut buy_vol = 0.0_f64;
+    let mut total_vol = 0.0_f64;
+    for i in start..=t {
+        buy_vol += candles[i].taker_buy_vol;
+        total_vol += candles[i].volume;
+    }
+    if total_vol < 1e-12 { 0.50 } else { buy_vol / total_vol }
+}
+
+/// Count consecutive green candles ending at bar t
+fn consecutive_greens(candles: &[Candle], t: usize) -> u32 {
+    let mut count = 0u32;
+    for i in (0..=t).rev() {
+        if candles[i].close > candles[i].open {
+            count += 1;
+        } else {
+            break;
+        }
+    }
+    count
+}
+
+/// Count consecutive red candles ending at bar t
+fn consecutive_reds(candles: &[Candle], t: usize) -> u32 {
+    let mut count = 0u32;
+    for i in (0..=t).rev() {
+        if candles[i].close < candles[i].open {
+            count += 1;
+        } else {
+            break;
+        }
+    }
+    count
+}
+
+struct TestResult {
+    label: String,
+    bars: u32,
+    green: u32,
+    red: u32,
+    win_rate: f64,
+    pnl: f64,
+    pnl_per_trade: f64,
+}
+
+fn test_signal<F>(candles: &[Candle], label: &str, min_bars: usize, predicate: F) -> TestResult
+where F: Fn(&[Candle], usize) -> bool,
+{
+    let eval_start = 20;
+    let mut bars = 0u32;
+    let mut green = 0u32;
+    let mut red = 0u32;
+
+    for t in eval_start..candles.len() - 1 {
+        if predicate(candles, t) {
+            bars += 1;
+            if candles[t + 1].close > candles[t + 1].open {
+                green += 1;
+            } else {
+                red += 1;
+            }
+        }
+    }
+
+    let wr = if bars > 0 { green as f64 / bars as f64 * 100.0 } else { 0.0 };
+    let pnl = (green as f64 * 0.495) - (red as f64 * 0.505);
+    let ppt = if bars > 0 { pnl / bars as f64 } else { 0.0 };
+
+    TestResult { label: label.to_string(), bars, green, red, win_rate: wr, pnl, pnl_per_trade: ppt }
+}
 
 pub fn run_diagnostics(candles: &[Candle]) {
-    if candles.len() < 110 {
-        eprintln!("Need at least 110 candles, got {}", candles.len());
+    if candles.len() < 50 {
+        eprintln!("Need at least 50 candles, got {}", candles.len());
         return;
     }
 
-    let th = Thresholds::default();
-    let eval_start = 100;
-    let total = candles.len() - eval_start - 1;
+    let days = candles.len() as f64 / 96.0;
 
-    // Distribution collectors
-    let mut spread_7_25_vals: Vec<f64> = Vec::new();
-    let mut slope_25_vals: Vec<f64> = Vec::new();
-    let mut close_pos_vals: Vec<f64> = Vec::new();
-    let mut green_8_vals: Vec<u32> = Vec::new();
+    println!("╔═════════════════════════════════════════════════════════════════════════════════════════════════════╗");
+    println!("║                        BULL SIGNAL SEARCH                                                       ║");
+    println!("║ {} bars ({:.1} days)  |  YES bet: cost=0.505  win=0.495 per unit                     ", candles.len(), days);
+    println!("║ All signals: when trigger fires on bar t, bet YES on bar t+1                                    ║");
+    println!("╠═════════════════════════════════════════════════════════════════════════════════════════════════════╣");
+    println!("║ {:40} │ {:>5} {:>6} {:>6} {:>5} {:>7} {:>8} {:>6} ║",
+        "SIGNAL", "BARS", "GREEN", "RED", "WR%", "PnL", "PnL/d", "PPT");
+    println!("╠══════════════════════════════════╪═══════════════════════════════════╪═══════════════════════════════════╣");
 
-    // Pipeline counters
-    let mut ma_stack_bull = 0;
-    let mut spread_bull = 0;
-    let mut slope_bull = 0;
-    let mut close_above_25 = 0;
-    let mut full_bull_candidate = 0;
-    let mut bull_score_pass = 0;
-    let mut consecutive_bull = 0;
-    let mut bull_yes_filter_pass = 0;
+    let mut results: Vec<TestResult> = Vec::new();
 
-    let mut ma_stack_bear = 0;
-    let mut full_bear_candidate = 0;
-    let mut bear_score_pass = 0;
-    let mut consecutive_bear = 0;
-    let mut bear_no_filter_pass = 0;
-
-    let mut prev_was_bull_candidate = false;
-    let mut prev_was_bear_candidate = false;
-
-    for t in eval_start..candles.len() - 1 {
-        let f = features::compute(candles, t);
-
-        // Collect distributions
-        spread_7_25_vals.push(f.spread_7_25);
-        slope_25_vals.push(f.slope_25);
-        close_pos_vals.push(f.close_pos);
-        green_8_vals.push(f.green_8);
-
-        // === BULL pipeline ===
-        let stack_ok = f.sma7 > f.sma25 && f.sma25 > f.sma99;
-        if stack_ok { ma_stack_bull += 1; }
-
-        if stack_ok && f.spread_7_25 >= th.bull_spread { spread_bull += 1; }
-        if stack_ok && f.spread_7_25 >= th.bull_spread && f.slope_25 >= th.bull_slope { slope_bull += 1; }
-        if stack_ok && f.spread_7_25 >= th.bull_spread && f.slope_25 >= th.bull_slope && candles[t].close > f.sma25 { close_above_25 += 1; }
-
-        let is_bc = bull_candidate(&candles[t], &f, &th);
-        if is_bc { full_bull_candidate += 1; }
-
-        let bs = bull_score(candles, t, &f);
-        if is_bc && bs >= th.bull_score_min { bull_score_pass += 1; }
-
-        let consec = is_bc && prev_was_bull_candidate && bs >= th.bull_score_min;
-        if consec { consecutive_bull += 1; }
-
-        let yf = bull_yes_filter(&f, &th);
-        if consec && yf { bull_yes_filter_pass += 1; }
-
-        prev_was_bull_candidate = is_bc && bs >= th.bull_score_min;
-
-        // === BEAR pipeline ===
-        let bstack_ok = f.sma7 < f.sma25 && f.sma25 < f.sma99;
-        if bstack_ok { ma_stack_bear += 1; }
-
-        let is_brc = bear_candidate(&candles[t], &f, &th);
-        if is_brc { full_bear_candidate += 1; }
-
-        let brs = bear_score(candles, t, &f);
-        if is_brc && brs >= th.bear_score_min { bear_score_pass += 1; }
-
-        let bconsec = is_brc && prev_was_bear_candidate && brs >= th.bear_score_min;
-        if bconsec { consecutive_bear += 1; }
-
-        let nf = bear_no_filter(candles, t, &f, &th);
-        if bconsec && nf { bear_no_filter_pass += 1; }
-
-        prev_was_bear_candidate = is_brc && brs >= th.bear_score_min;
+    // 1. CONSECUTIVE GREEN CANDLES
+    for min_green in [2, 3, 4, 5, 6, 7, 8] {
+        let label = format!("{}+ consec greens", min_green);
+        results.push(test_signal(candles, &label, 100,
+            move |c: &[Candle], t: usize| consecutive_greens(c, t) >= min_green));
     }
 
-    // Compute percentiles for spread and slope
-    let mut s_sorted = spread_7_25_vals.clone();
-    s_sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
-    let mut sl_sorted = slope_25_vals.clone();
-    sl_sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    // 2. TAKER RATIO (BUYER DOMINANCE)
+    for ratio in [0.55, 0.57, 0.58, 0.60, 0.62, 0.65] {
+        let lb = 4u32;
+        let label = format!("taker ratio > {:.2} (lb={})", ratio, lb);
+        results.push(test_signal(candles, &label, 100,
+            move |c: &[Candle], t: usize| taker_ratio(c, t, lb as usize) > ratio));
+    }
 
-    let pct = |v: &Vec<f64>, p: f64| -> f64 {
-        let idx = ((p / 100.0) * (v.len() - 1) as f64) as usize;
-        v[idx.min(v.len() - 1)]
-    };
+    // 3. TAKER RATIO (BUYER DOMINANCE) - longer lookback
+    for lb in [6usize, 8, 12] {
+        let label = format!("taker ratio > 0.58 (lb={})", lb);
+        results.push(test_signal(candles, &label, 100,
+            move |c: &[Candle], t: usize| taker_ratio(c, t, lb) > 0.58));
+    }
 
-    println!("╔══════════════════════════════════════════════════════════════════╗");
-    println!("║                    THRESHOLD DIAGNOSTICS                        ║");
-    println!("╠══════════════════════════════════════════════════════════════════╣");
-    println!("║ Bars evaluated: {}                                              ", total);
-    println!("╠══════════════════════════════════════════════════════════════════╣");
-    println!("║ FEATURE DISTRIBUTIONS                                            ║");
-    println!("╠══════════════════════════════════════════════════════════════════╣");
-    println!("║ spread_7_25: min={:.3} p10={:.3} p25={:.3} p50={:.3} p75={:.3} p90={:.3} max={:.3}",
-        s_sorted.first().unwrap_or(&0.0),
-        pct(&s_sorted, 10.0), pct(&s_sorted, 25.0), pct(&s_sorted, 50.0),
-        pct(&s_sorted, 75.0), pct(&s_sorted, 90.0), s_sorted.last().unwrap_or(&0.0));
-    println!("║ slope_25:    min={:.3} p10={:.3} p25={:.3} p50={:.3} p75={:.3} p90={:.3} max={:.3}",
-        sl_sorted.first().unwrap_or(&0.0),
-        pct(&sl_sorted, 10.0), pct(&sl_sorted, 25.0), pct(&sl_sorted, 50.0),
-        pct(&sl_sorted, 75.0), pct(&sl_sorted, 90.0), sl_sorted.last().unwrap_or(&0.0));
+    // 4. CLOSE ABOVE SMA7 (short-term trend)
+    for sma_period in [5u32, 7, 10] {
+        let label = format!("close > SMA{}(t-1)", sma_period);
+        results.push(test_signal(candles, &label, 100,
+            move |c: &[Candle], t: usize| {
+                if t < sma_period as usize + 1 { return false; }
+                let sma: f64 = ((t + 1 - sma_period as usize)..=t)
+                    .map(|i| c[i].close).sum::<f64>() / sma_period as f64;
+                c[t].close > sma
+            }));
+    }
 
-    let mut g8_sorted = green_8_vals.clone();
-    g8_sorted.sort();
-    println!("║ green_8:     min={} p10={} p25={} p50={} p75={} p90={} max={}",
-        g8_sorted.first().unwrap_or(&0), g8_sorted[total/10], g8_sorted[total/4],
-        g8_sorted[total/2], g8_sorted[3*total/4], g8_sorted[9*total/10], g8_sorted.last().unwrap_or(&0));
-    println!("║                                                                  ");
+    // 5. CLOSE > SMA7 AND CLOSE > SMA25 (trend alignment)
+    results.push(test_signal(candles, "close > SMA7 & SMA25", 100,
+        |c: &[Candle], t: usize| {
+            if t < 25 { return false; }
+            let sma7: f64 = (t-6..=t).map(|i| c[i].close).sum::<f64>() / 7.0;
+            let sma25: f64 = (t-24..=t).map(|i| c[i].close).sum::<f64>() / 25.0;
+            c[t].close > sma7 && c[t].close > sma25
+        }));
 
-    let spread_gt_010 = s_sorted.iter().filter(|&&x| x >= 0.10).count();
-    let spread_gt_005 = s_sorted.iter().filter(|&&x| x >= 0.05).count();
-    let spread_gt_000 = s_sorted.iter().filter(|&&x| x > 0.0).count();
-    let spread_lt_000 = s_sorted.iter().filter(|&&x| x < 0.0).count();
-    let spread_lt_m010 = s_sorted.iter().filter(|&&x| x <= -0.10).count();
-    let spread_lt_m005 = s_sorted.iter().filter(|&&x| x <= -0.05).count();
+    // 6. GREEN CANDLE + CLOSE ABOVE SMA7 (momentum + trend)
+    results.push(test_signal(candles, "green + close > SMA7", 100,
+        |c: &[Candle], t: usize| {
+            let sma7: f64 = (t.saturating_sub(6)..=t).map(|i| c[i].close).sum::<f64>() / 7.0;
+            c[t].close > c[t].open && c[t].close > sma7
+        }));
 
-    println!("║ spread > 0.00: {}/{} ({:.1}%)   spread < 0.00: {}/{} ({:.1}%)",
-        spread_gt_000, total, spread_gt_000 as f64/total as f64*100.0,
-        spread_lt_000, total, spread_lt_000 as f64/total as f64*100.0);
-    println!("║ spread > 0.05: {}/{} ({:.1}%)   spread < -0.05: {}/{} ({:.1}%)",
-        spread_gt_005, total, spread_gt_005 as f64/total as f64*100.0,
-        spread_lt_m005, total, spread_lt_m005 as f64/total as f64*100.0);
-    println!("║ spread > 0.10: {}/{} ({:.1}%)   spread < -0.10: {}/{} ({:.1}%)",
-        spread_gt_010, total, spread_gt_010 as f64/total as f64*100.0,
-        spread_lt_m010, total, spread_lt_m010 as f64/total as f64*100.0);
-    println!("║                                                                  ");
+    // 7. VOLUME EXPANSION ON GREEN CANDLE
+    results.push(test_signal(candles, "green + vol > avg_vol", 100,
+        |c: &[Candle], t: usize| {
+            if t < 20 { return false; }
+            let avg_vol: f64 = (t-19..=t).map(|i| c[i].volume).sum::<f64>() / 20.0;
+            c[t].close > c[t].open && c[t].volume > avg_vol
+        }));
 
-    let slope_gt_008 = sl_sorted.iter().filter(|&&x| x >= 0.08).count();
-    let slope_gt_004 = sl_sorted.iter().filter(|&&x| x >= 0.04).count();
-    let slope_gt_000 = sl_sorted.iter().filter(|&&x| x > 0.0).count();
-    let slope_lt_000 = sl_sorted.iter().filter(|&&x| x < 0.0).count();
-    let slope_lt_m008 = sl_sorted.iter().filter(|&&x| x <= -0.08).count();
-    let slope_lt_m004 = sl_sorted.iter().filter(|&&x| x <= -0.04).count();
+    // 8. TAKER BUY DOMINANCE ON GREEN CANDLE
+    results.push(test_signal(candles, "green + taker ratio > 0.55", 100,
+        |c: &[Candle], t: usize| {
+            c[t].close > c[t].open && c[t].volume > 1e-12 && (c[t].taker_buy_vol / c[t].volume) > 0.55
+        }));
 
-    println!("║ slope > 0.00: {}/{} ({:.1}%)   slope < 0.00: {}/{} ({:.1}%)",
-        slope_gt_000, total, slope_gt_000 as f64/total as f64*100.0,
-        slope_lt_000, total, slope_lt_000 as f64/total as f64*100.0);
-    println!("║ slope > 0.04: {}/{} ({:.1}%)   slope < -0.04: {}/{} ({:.1}%)",
-        slope_gt_004, total, slope_gt_004 as f64/total as f64*100.0,
-        slope_lt_m004, total, slope_lt_m004 as f64/total as f64*100.0);
-    println!("║ slope > 0.08: {}/{} ({:.1}%)   slope < -0.08: {}/{} ({:.1}%)",
-        slope_gt_008, total, slope_gt_008 as f64/total as f64*100.0,
-        slope_lt_m008, total, slope_lt_m008 as f64/total as f64*100.0);
-    println!("╠══════════════════════════════════════════════════════════════════╣");
-    println!("║ BULL PIPELINE (current thresholds)                               ");
-    println!("╠══════════════════════════════════════════════════════════════════╣");
-    println!("║ MA stack bullish (7>25>99):     {}/{} ({:.1}%)", ma_stack_bull, total, ma_stack_bull as f64/total as f64*100.0);
-    println!("║ + spread >= 0.10:               {}/{} ({:.1}%)", spread_bull, total, spread_bull as f64/total as f64*100.0);
-    println!("║ + slope >= 0.08:                {}/{} ({:.1}%)", slope_bull, total, slope_bull as f64/total as f64*100.0);
-    println!("║ + close > SMA25:                {}/{} ({:.1}%)", close_above_25, total, close_above_25 as f64/total as f64*100.0);
-    println!("║ Full bull candidate:            {}/{} ({:.1}%)", full_bull_candidate, total, full_bull_candidate as f64/total as f64*100.0);
-    println!("║ + bull_score >= 4:              {}/{} ({:.1}%)", bull_score_pass, total, bull_score_pass as f64/total as f64*100.0);
-    println!("║ + 2-bar consecutive:            {}/{} ({:.1}%)", consecutive_bull, total, consecutive_bull as f64/total as f64*100.0);
-    println!("║ + YES filter pass:              {}/{} ({:.1}%)", bull_yes_filter_pass, total, bull_yes_filter_pass as f64/total as f64*100.0);
-    println!("╠══════════════════════════════════════════════════════════════════╣");
-    println!("║ BEAR PIPELINE (current thresholds)                               ");
-    println!("╠══════════════════════════════════════════════════════════════════╣");
-    println!("║ MA stack bearish (7<25<99):     {}/{} ({:.1}%)", ma_stack_bear, total, ma_stack_bear as f64/total as f64*100.0);
-    println!("║ Full bear candidate:            {}/{} ({:.1}%)", full_bear_candidate, total, full_bear_candidate as f64/total as f64*100.0);
-    println!("║ + bear_score >= 4:              {}/{} ({:.1}%)", bear_score_pass, total, bear_score_pass as f64/total as f64*100.0);
-    println!("║ + 2-bar consecutive:            {}/{} ({:.1}%)", consecutive_bear, total, consecutive_bear as f64/total as f64*100.0);
-    println!("║ + NO filter pass:               {}/{} ({:.1}%)", bear_no_filter_pass, total, bear_no_filter_pass as f64/total as f64*100.0);
-    println!("╚══════════════════════════════════════════════════════════════════╝");
+    // 9. 3+ CONSEC GREEN + TAKER RATIO > 0.55
+    for ratio in [0.52, 0.55, 0.58] {
+        let label = format!("3+ greens + taker > {:.2}", ratio);
+        results.push(test_signal(candles, &label, 100,
+            move |c: &[Candle], t: usize| {
+                consecutive_greens(c, t) >= 3 && c[t].volume > 1e-12 && (c[t].taker_buy_vol / c[t].volume) > ratio
+            }));
+    }
+
+    // 10. 3+ CONSEC GREEN + close > SMA7
+    results.push(test_signal(candles, "3+ greens + close > SMA7", 100,
+        |c: &[Candle], t: usize| {
+            let sma7: f64 = (t.saturating_sub(6)..=t).map(|i| c[i].close).sum::<f64>() / 7.0;
+            consecutive_greens(c, t) >= 3 && c[t].close > sma7
+        }));
+
+    // 11. CLOSE POSITION (strong close in upper portion)
+    for threshold in [0.65, 0.70, 0.75, 0.80] {
+        let label = format!("close_pos > {:.2}", threshold);
+        results.push(test_signal(candles, &label, 100,
+            move |c: &[Candle], t: usize| {
+                let rng = c[t].high - c[t].low;
+                if rng < 1e-12 { false } else { (c[t].close - c[t].low) / rng > threshold }
+            }));
+    }
+
+    // 12. STRONG GREEN (close_pos > 0.70 + range > avg)
+    results.push(test_signal(candles, "strong green (pos>0.7 + big range)", 100,
+        |c: &[Candle], t: usize| {
+            if t < 20 { return false; }
+            let rng = c[t].high - c[t].low;
+            let avg_rng: f64 = (t-19..=t).map(|i| c[i].high - c[i].low).sum::<f64>() / 20.0;
+            rng > avg_rng && rng > 1e-12 && (c[t].close - c[t].low) / rng > 0.70 && c[t].close > c[t].open
+        }));
+
+    // Sort by PnL descending
+    results.sort_by(|a, b| b.pnl.partial_cmp(&a.pnl).unwrap());
+
+    for r in &results {
+        println!("║ {:40} │ {:>5} {:>6} {:>6} {:>5.1} {:>+7.1} {:>+7.1} {:>+6.4} ║",
+            r.label, r.bars, r.green, r.red, r.win_rate, r.pnl,
+            r.pnl / days, r.pnl_per_trade);
+    }
+
+    // Best above break-even (50.5%)
+    let profitable: Vec<_> = results.iter().filter(|r| r.win_rate > 50.5 && r.bars >= 200).collect();
+
+    println!("╠═════════════════════════════════════════════════════════════════════════════════════════════════════╣");
+    println!("║ PROFITABLE SIGNALS (win rate > 50.5%, min 200 bars)                                         ║");
+    println!("╠═════════════════════════════════════════════════════════════════════════════════════════════════════╣");
+    if profitable.is_empty() {
+        println!("║   NONE found — no single signal achieves >50.5% YES win rate with enough volume                    ║");
+        println!("║   This means BULL as a standalone directional bet is not viable with simple indicators             ║");
+    } else {
+        for r in profitable.iter().take(10) {
+            println!("║   {:40}  {} bars  {:.1}%  PnL={:+.1}  ppt={:+.4}         ║",
+                r.label, r.bars, r.win_rate, r.pnl, r.pnl_per_trade);
+        }
+    }
+
+    println!("╚═════════════════════════════════════════════════════════════════════════════════════════════════════╝");
 }

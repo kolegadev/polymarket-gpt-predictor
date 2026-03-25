@@ -1,152 +1,152 @@
 use anyhow::Result;
-use tracing::info;
 use rusqlite::params;
 use std::sync::Arc;
-use crate::decision::state::{State, Decision};
+use tracing::info;
 use crate::db::Db;
-use crate::types::models::{PaperTrade, RegimeSnapshot};
-use crate::decision::features::Features;
+use crate::types::models::PaperTrade;
 
-/// Paper trade manager — tracks decisions and resolves outcomes.
+/// Kelly criterion position sizing for binary bets.
+pub struct KellySizer {
+    pub balance: f64,
+    pub starting_balance: f64,
+    pub max_bet_pct: f64,
+    pub avg_odds: f64,
+}
+
+impl KellySizer {
+    pub fn new(starting_balance: f64, max_bet_pct: f64, avg_odds: f64) -> Self {
+        Self { balance: starting_balance, starting_balance, max_bet_pct, avg_odds }
+    }
+
+    /// Kelly stake for a binary bet. Uses half-Kelly for safety, capped at max_bet_pct of balance.
+    pub fn size(&self, win_prob: f64, odds: f64) -> f64 {
+        if win_prob <= 0.0 || win_prob >= 1.0 { return 0.0; }
+        let b = if odds < 1e-6 { 1.0 } else { (1.0 - odds) / odds };
+        let q = 1.0 - win_prob;
+        let kelly = (win_prob * b - q) / b;
+        let half_kelly = kelly * 0.5;
+        let max_stake = self.balance * self.max_bet_pct;
+        half_kelly.min(max_stake).max(0.0)
+    }
+
+    pub fn settle(&mut self, stake: f64, won: bool, odds: f64) {
+        if won {
+            self.balance += stake * (1.0 - odds);
+        } else {
+            self.balance -= stake;
+        }
+    }
+
+    pub fn roi(&self) -> f64 {
+        if self.starting_balance < 1e-6 { 0.0 }
+        else { (self.balance - self.starting_balance) / self.starting_balance * 100.0 }
+    }
+}
+
 pub struct PaperTracker {
     db: Arc<Db>,
+    pub kelly: KellySizer,
 }
 
 impl PaperTracker {
-    pub fn new(db: Arc<Db>) -> Self {
-        Self { db }
+    pub fn new(db: Arc<Db>, starting_balance: f64) -> Self {
+        Self {
+            db,
+            kelly: KellySizer::new(starting_balance, 0.05, 0.505),
+        }
     }
 
-    /// Record a paper trade decision for the next 15m block.
-    pub fn record_decision(
+    pub fn record_bet(
         &self,
         block_open_time: i64,
         block_close_time: i64,
         reference_price: f64,
-        regime: State,
-        decision: Decision,
-        open_odds_yes: Option<f64>,
-        open_odds_no: Option<f64>,
-        features: &Features,
-        bull_score: Option<u32>,
-        bear_score: Option<u32>,
+        decision: &str,
+        odds: Option<f64>,
+        taker_ratio: f64,
+        stake: f64,
     ) -> Result<()> {
-        let trade = PaperTrade {
-            id: 0,
-            block_open_time,
-            block_close_time,
-            reference_price,
-            resolution_price: 0.0,
-            regime: format!("{:?}", regime),
-            decision: format!("{:?}", decision),
-            open_odds_yes,
-            open_odds_no,
-            outcome: None,
-            pnl: None,
-            created_at: chrono::Utc::now().to_rfc3339(),
+        let odds_str = match odds {
+            Some(o) => format!("{:.3}", o),
+            None => "none".to_string(),
         };
-
-        self.db.insert_paper_trade(&trade)?;
-
-        // Also record regime snapshot
-        let snapshot = RegimeSnapshot {
-            id: 0,
-            block_open_time,
-            state: format!("{:?}", regime),
-            bull_score,
-            bear_score,
-            spread_7_25: features.spread_7_25,
-            slope_25: features.slope_25,
-            close_pos: features.close_pos,
-            green_8: features.green_8,
-            red_8: features.red_8,
-        };
-        self.db.insert_regime_snapshot(&snapshot)?;
-
+        let conn = self.db.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO paper_trades (block_open_time, block_close_time, reference_price,
+             regime, decision, open_odds_no, outcome, pnl, stake, taker_ratio)
+             VALUES (?1, ?2, ?3, 'BEAR', ?4, ?5, NULL, NULL, ?6, ?7)",
+            params![block_open_time, block_close_time, reference_price, decision, odds, stake, taker_ratio],
+        )?;
         info!(
-            "📝 Paper trade: block={} regime={:?} decision={:?} ref_price={:.2} odds_yes={:?} odds_no={:?}",
-            block_open_time, regime, decision, reference_price, open_odds_yes, open_odds_no
+            "BET {} block={} stake={:.2} ratio={:.3} odds={} bal={:.2}",
+            decision, block_open_time, stake, taker_ratio, odds_str,
+            self.kelly.balance,
         );
-
         Ok(())
     }
 
-    /// Resolve a specific trade by its block open time.
-    pub fn resolve_trade_by_block(&self, block_open_time: i64, close_price: f64) -> Result<Option<(String, f64)>> {
+    pub fn resolve_trade_by_block(
+        &self,
+        block_open_time: i64,
+        close_price: f64,
+        stake: f64,
+        odds: f64,
+    ) -> Result<Option<(String, f64)>> {
         let conn = self.db.conn.lock().unwrap();
         let mut stmt = conn.prepare(
-            "SELECT id, decision, open_odds_yes, open_odds_no, reference_price
-             FROM paper_trades WHERE block_open_time = ?1 AND outcome IS NULL"
+            "SELECT id, decision, reference_price FROM paper_trades
+             WHERE block_open_time = ?1 AND outcome IS NULL AND pnl IS NULL"
         )?;
         let rows: Vec<_> = stmt.query_map(params![block_open_time], |row| {
-            Ok((
-                row.get::<_, i64>(0)?,
-                row.get::<_, String>(1)?,
-                row.get::<_, Option<f64>>(2)?,
-                row.get::<_, Option<f64>>(3)?,
-                row.get::<_, f64>(4)?,
-            ))
+            Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?, row.get::<_, f64>(2)?))
         })?.flatten().collect();
 
-        if rows.is_empty() {
-            info!("No unresolved trade for block {}", block_open_time);
-            return Ok(None);
-        }
+        if rows.is_empty() { return Ok(None); }
 
-        for (id, decision, odds_yes, odds_no, ref_price) in rows {
-            let went_up = close_price > ref_price;
+        for (id, decision, ref_price) in rows {
             let went_down = close_price < ref_price;
-            info!("Resolving trade {}: dec={} ref={:.2} close={:.2} up={} down={}", id, decision, ref_price, close_price, went_up, went_down);
-
-            let (outcome, pnl) = match decision.as_str() {
-                "YES" | "Yes" => {
-                    if went_up {
-                        let payout = odds_yes.unwrap_or(0.50);
-                        ("WIN".to_string(), payout)
-                    } else if went_down {
-                        ("LOSS".to_string(), -1.0)
-                    } else {
-                        ("PUSH".to_string(), 0.0)
-                    }
-                }
-                "NO" | "No" => {
-                    if went_down {
-                        let payout = odds_no.unwrap_or(0.50);
-                        ("WIN".to_string(), payout)
-                    } else if went_up {
-                        ("LOSS".to_string(), -1.0)
-                    } else {
-                        ("PUSH".to_string(), 0.0)
-                    }
-                }
-                _ => continue,
+            let (outcome, pnl_units) = if decision == "NO" || decision == "No" {
+                if went_down { ("WIN".to_string(), stake * (1.0 - odds)) }
+                else { ("LOSS".to_string(), -stake) }
+            } else {
+                if close_price > ref_price { ("WIN".to_string(), stake * (1.0 - odds)) }
+                else { ("LOSS".to_string(), -stake) }
             };
 
-            let rows_updated = conn.execute(
+            conn.execute(
                 "UPDATE paper_trades SET outcome = ?1, pnl = ?2, resolution_price = ?3 WHERE id = ?4",
-                params![outcome, pnl, close_price, id],
+                params![outcome, pnl_units, close_price, id],
             )?;
-            info!("✅ Resolved trade {}: {} pnl={:.4} rows_updated={}", id, outcome, pnl, rows_updated);
-            return Ok(Some((outcome, pnl)));
+
+            info!(
+                "  {} stake={:.2} pnl={:+.2} bal={:.2} close={:.2}",
+                outcome, stake, pnl_units, self.kelly.balance, close_price,
+            );
+            return Ok(Some((outcome, pnl_units)));
         }
         Ok(None)
     }
 
-    /// Print a summary of paper trade performance.
     pub fn print_summary(&self) -> Result<()> {
-        let (total, wins, losses, skips, total_pnl) = self.db.get_summary()?;
+        let conn = self.db.conn.lock().unwrap();
+        let total: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM paper_trades WHERE outcome IS NOT NULL", [], |r| r.get(0))?;
+        let wins: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM paper_trades WHERE outcome = 'WIN'", [], |r| r.get(0))?;
+        let losses: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM paper_trades WHERE outcome = 'LOSS'", [], |r| r.get(0))?;
+        let total_pnl: f64 = conn.query_row(
+            "SELECT COALESCE(SUM(pnl), 0) FROM paper_trades WHERE outcome IS NOT NULL", [], |r| r.get(0))?;
+        let wr = if total > 0 { wins as f64 / total as f64 * 100.0 } else { 0.0 };
 
-        let win_rate = if total > 0 { wins as f64 / total as f64 * 100.0 } else { 0.0 };
-
-        info!("═══════════════════════════════════════════");
-        info!("📊 PAPER TRADE SUMMARY");
-        info!("═══════════════════════════════════════════");
-        info!("Total bets: {}", total);
-        info!("Wins: {} | Losses: {}", wins, losses);
-        info!("Win rate: {:.1}%", win_rate);
-        info!("Skipped blocks: {}", skips);
-        info!("Total PnL: {:.4} units", total_pnl);
-        info!("═══════════════════════════════════════════");
+        info!("==================================================");
+        info!("  BEAR-ONLY PAPER TRADE SUMMARY");
+        info!("  Balance: ${:.2}  |  ROI: {:+.2}%", self.kelly.balance, self.kelly.roi());
+        info!("  PnL: ${:.2}", total_pnl);
+        info!("  Bets: {}  Wins: {}  Losses: {}", total, wins, losses);
+        info!("  Win rate: {:.1}%", wr);
+        info!("  PnL/trade: ${:.4}", if total > 0 { total_pnl / total as f64 } else { 0.0 });
+        info!("==================================================");
 
         Ok(())
     }

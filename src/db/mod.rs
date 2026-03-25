@@ -41,6 +41,8 @@ impl Db {
                 open_odds_no REAL,
                 outcome TEXT,
                 pnl REAL,
+                stake REAL DEFAULT 0,
+                taker_ratio REAL DEFAULT 0.5,
                 created_at TEXT NOT NULL DEFAULT (datetime('now'))
             );
 
