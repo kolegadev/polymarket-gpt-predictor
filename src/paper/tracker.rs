@@ -23,17 +23,21 @@ impl KellySizer {
         if win_prob <= 0.0 || win_prob >= 1.0 { return 0.0; }
         let b = if odds < 1e-6 { 1.0 } else { (1.0 - odds) / odds };
         let q = 1.0 - win_prob;
-        let kelly = (win_prob * b - q) / b;
-        let half_kelly = kelly * 0.5;
+        let kelly_frac = (win_prob * b - q) / b;
+        let half_kelly_frac = kelly_frac * 0.5;
+        let kelly_stake = self.balance * half_kelly_frac;
         let max_stake = self.balance * self.max_bet_pct;
-        half_kelly.min(max_stake).max(0.0)
+        kelly_stake.min(max_stake).max(0.0)
     }
 
     pub fn settle(&mut self, stake: f64, won: bool, odds: f64) {
+        let cost = stake * odds;  // actual amount paid
         if won {
-            self.balance += stake * (1.0 - odds);
+            // You paid cost, get $1 per share: profit = stake - cost
+            self.balance += stake - cost;
         } else {
-            self.balance -= stake;
+            // You paid cost, get nothing back
+            self.balance -= cost;
         }
     }
 
@@ -86,7 +90,7 @@ impl PaperTracker {
     }
 
     pub fn resolve_trade_by_block(
-        &self,
+        &mut self,
         block_open_time: i64,
         open_price: f64,
         close_price: f64,
@@ -109,16 +113,19 @@ impl PaperTracker {
             let went_down = close_price < open_price;
             let (outcome, pnl_units) = if decision == "NO" || decision == "No" {
                 if went_down { ("WIN".to_string(), stake * (1.0 - odds)) }
-                else { ("LOSS".to_string(), -stake) }
+                else { ("LOSS".to_string(), -stake * odds) }
             } else {
                 if close_price >= open_price { ("WIN".to_string(), stake * (1.0 - odds)) }
-                else { ("LOSS".to_string(), -stake) }
+                else { ("LOSS".to_string(), -stake * odds) }
             };
 
             conn.execute(
                 "UPDATE paper_trades SET outcome = ?1, pnl = ?2, resolution_price = ?3, reference_price = ?4 WHERE id = ?5",
                 params![outcome, pnl_units, close_price, open_price, id],
             )?;
+
+            // Update Kelly balance with the trade result
+            self.kelly.settle(stake, outcome == "WIN", odds);
 
             info!(
                 "  {} open={:.2} close={:.2} stake={:.2} pnl={:+.2} bal={:.2}",
@@ -142,7 +149,7 @@ impl PaperTracker {
         let wr = if total > 0 { wins as f64 / total as f64 * 100.0 } else { 0.0 };
 
         info!("==================================================");
-        info!("  BEAR-ONLY PAPER TRADE SUMMARY");
+        info!("  PAPER TRADE SUMMARY");
         info!("  Balance: ${:.2}  |  ROI: {:+.2}%", self.kelly.balance, self.kelly.roi());
         info!("  PnL: ${:.2}", total_pnl);
         info!("  Bets: {}  Wins: {}  Losses: {}", total, wins, losses);

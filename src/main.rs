@@ -36,7 +36,7 @@ async fn main() -> Result<()> {
     std::fs::create_dir_all("data")?;
 
     let db = Arc::new(Db::new(&args.db_path)?);
-    let tracker = PaperTracker::new(db.clone(), STARTING_BALANCE);
+    let mut tracker = PaperTracker::new(db.clone(), STARTING_BALANCE);
 
     if args.summary {
         tracker.print_summary()?;
@@ -49,7 +49,7 @@ async fn main() -> Result<()> {
     }
 
     if args.simulate {
-        return simulate_5m(&db, &tracker);
+        return simulate_5m(&db, &mut tracker);
     }
 
     // ═════════════════════════════════════════════════════════════════
@@ -160,7 +160,7 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
-fn simulate_5m(db: &Arc<Db>, tracker: &PaperTracker) -> Result<()> {
+fn simulate_5m(db: &Arc<Db>, tracker: &mut PaperTracker) -> Result<()> {
     info!("5m BULL YES simulation (7-day window)...");
     let candles = db.get_latest_candles(5000)?;
     if candles.len() < 20 {
