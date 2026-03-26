@@ -87,11 +87,11 @@ async fn main() -> Result<()> {
                 bar_count += 1;
 
                 // First: resolve the trade for the block that just closed
-                // (this was placed ~15min ago for this block)
+                // reference = candle.open (block start price), resolution = candle.close (block end price)
                 let stake_to_resolve = current_stake;
                 if current_stake > 0.0 {
                     match tracker.resolve_trade_by_block(
-                        candle.open_time, candle.close, stake_to_resolve, current_odds,
+                        candle.open_time, candle.open, candle.close, stake_to_resolve, current_odds,
                     ) {
                         Ok(Some((outcome, _pnl))) => {
                             info!("  RESOLVED block={}: {} bal={:.2}",
@@ -215,7 +215,7 @@ fn run_simulation(db: &Arc<Db>, tracker: &PaperTracker) -> Result<()> {
                     next.open_time, next.close_time, candles[t].close,
                     "NO", Some(DEFAULT_ODDS), ratio, stake,
                 );
-                match tracker.resolve_trade_by_block(next.open_time, next.close, stake, DEFAULT_ODDS) {
+                match tracker.resolve_trade_by_block(next.open_time, next.open, next.close, stake, DEFAULT_ODDS) {
                     Ok(Some((outcome, _))) => {
                         if outcome == "WIN" { wins += 1; }
                     }

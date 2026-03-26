@@ -88,39 +88,41 @@ impl PaperTracker {
     pub fn resolve_trade_by_block(
         &self,
         block_open_time: i64,
+        open_price: f64,
         close_price: f64,
         stake: f64,
         odds: f64,
     ) -> Result<Option<(String, f64)>> {
         let conn = self.db.conn.lock().unwrap();
         let mut stmt = conn.prepare(
-            "SELECT id, decision, reference_price FROM paper_trades
+            "SELECT id, decision FROM paper_trades
              WHERE block_open_time = ?1 AND outcome IS NULL AND pnl IS NULL"
         )?;
         let rows: Vec<_> = stmt.query_map(params![block_open_time], |row| {
-            Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?, row.get::<_, f64>(2)?))
+            Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
         })?.flatten().collect();
 
         if rows.is_empty() { return Ok(None); }
 
-        for (id, decision, ref_price) in rows {
-            let went_down = close_price < ref_price;
+        for (id, decision) in rows {
+            // UP if close >= open, DOWN if close < open (matches PolyMarket resolution)
+            let went_down = close_price < open_price;
             let (outcome, pnl_units) = if decision == "NO" || decision == "No" {
                 if went_down { ("WIN".to_string(), stake * (1.0 - odds)) }
                 else { ("LOSS".to_string(), -stake) }
             } else {
-                if close_price > ref_price { ("WIN".to_string(), stake * (1.0 - odds)) }
+                if close_price >= open_price { ("WIN".to_string(), stake * (1.0 - odds)) }
                 else { ("LOSS".to_string(), -stake) }
             };
 
             conn.execute(
-                "UPDATE paper_trades SET outcome = ?1, pnl = ?2, resolution_price = ?3 WHERE id = ?4",
-                params![outcome, pnl_units, close_price, id],
+                "UPDATE paper_trades SET outcome = ?1, pnl = ?2, resolution_price = ?3, reference_price = ?4 WHERE id = ?5",
+                params![outcome, pnl_units, close_price, open_price, id],
             )?;
 
             info!(
-                "  {} stake={:.2} pnl={:+.2} bal={:.2} close={:.2}",
-                outcome, stake, pnl_units, self.kelly.balance, close_price,
+                "  {} open={:.2} close={:.2} stake={:.2} pnl={:+.2} bal={:.2}",
+                outcome, open_price, close_price, stake, pnl_units, self.kelly.balance,
             );
             return Ok(Some((outcome, pnl_units)));
         }
