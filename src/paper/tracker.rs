@@ -6,6 +6,11 @@ use crate::db::Db;
 use crate::types::models::PaperTrade;
 
 /// Kelly criterion position sizing for binary bets.
+///
+/// `stake` always represents **dollars at risk** (the amount you lose if wrong).
+/// On PolyMarket, paying $stake at `odds` buys you `stake / odds` shares.
+/// Win resolves at $1/share: payout = stake / odds, profit = stake × (1/odds - 1).
+/// Loss: you lose your stake.
 pub struct KellySizer {
     pub balance: f64,
     pub starting_balance: f64,
@@ -18,10 +23,11 @@ impl KellySizer {
         Self { balance: starting_balance, starting_balance, max_bet_pct, avg_odds }
     }
 
-    /// Kelly stake for a binary bet. Uses half-Kelly for safety, capped at max_bet_pct of balance.
+    /// Returns the dollar amount to risk on this bet.
+    /// Uses half-Kelly for safety, capped at max_bet_pct of current balance.
     pub fn size(&self, win_prob: f64, odds: f64) -> f64 {
-        if win_prob <= 0.0 || win_prob >= 1.0 { return 0.0; }
-        let b = if odds < 1e-6 { 1.0 } else { (1.0 - odds) / odds };
+        if win_prob <= 0.0 || win_prob >= 1.0 || odds <= 1e-6 { return 0.0; }
+        let b = (1.0 - odds) / odds;  // payout ratio: profit per dollar risked
         let q = 1.0 - win_prob;
         let kelly_frac = (win_prob * b - q) / b;
         let half_kelly_frac = kelly_frac * 0.5;
@@ -30,14 +36,15 @@ impl KellySizer {
         kelly_stake.min(max_stake).max(0.0)
     }
 
+    /// Update balance after trade resolution.
+    /// stake = dollars risked (lost if wrong).
     pub fn settle(&mut self, stake: f64, won: bool, odds: f64) {
-        let cost = stake * odds;  // actual amount paid
         if won {
-            // You paid cost, get $1 per share: profit = stake - cost
-            self.balance += stake - cost;
+            // You risked `stake`, bought stake/odds shares, each resolves to $1
+            let payout = stake / odds;
+            self.balance += payout - stake;  // net profit
         } else {
-            // You paid cost, get nothing back
-            self.balance -= cost;
+            self.balance -= stake;  // you lose what you risked
         }
     }
 
@@ -78,11 +85,11 @@ impl PaperTracker {
         conn.execute(
             "INSERT INTO paper_trades (block_open_time, block_close_time, reference_price,
              regime, decision, open_odds_no, outcome, pnl, stake, taker_ratio)
-             VALUES (?1, ?2, ?3, 'BEAR', ?4, ?5, NULL, NULL, ?6, ?7)",
+             VALUES (?1, ?2, ?3, 'BULL', ?4, ?5, NULL, NULL, ?6, ?7)",
             params![block_open_time, block_close_time, reference_price, decision, odds, stake, taker_ratio],
         )?;
         info!(
-            "BET {} block={} stake={:.2} ratio={:.3} odds={} bal={:.2}",
+            "BET {} block={} risk=${:.2} ratio={:.3} odds={} bal=${:.2}",
             decision, block_open_time, stake, taker_ratio, odds_str,
             self.kelly.balance,
         );
@@ -111,12 +118,16 @@ impl PaperTracker {
         for (id, decision) in rows {
             // UP if close >= open, DOWN if close < open (matches PolyMarket resolution)
             let went_down = close_price < open_price;
-            let (outcome, pnl_units) = if decision == "NO" || decision == "No" {
-                if went_down { ("WIN".to_string(), stake * (1.0 - odds)) }
-                else { ("LOSS".to_string(), -stake * odds) }
+            let won = match decision.as_str() {
+                "NO" | "No" => went_down,
+                _ => !went_down,  // YES: win if price went up
+            };
+
+            let outcome = if won { "WIN".to_string() } else { "LOSS".to_string() };
+            let pnl_units = if won {
+                stake / odds - stake  // profit = stake × (1/odds - 1)
             } else {
-                if close_price >= open_price { ("WIN".to_string(), stake * (1.0 - odds)) }
-                else { ("LOSS".to_string(), -stake * odds) }
+                -stake  // lose full risk amount
             };
 
             conn.execute(
@@ -124,11 +135,11 @@ impl PaperTracker {
                 params![outcome, pnl_units, close_price, open_price, id],
             )?;
 
-            // Update Kelly balance with the trade result
-            self.kelly.settle(stake, outcome == "WIN", odds);
+            // Update Kelly balance
+            self.kelly.settle(stake, won, odds);
 
             info!(
-                "  {} open={:.2} close={:.2} stake={:.2} pnl={:+.2} bal={:.2}",
+                "  {} open={:.2} close={:.2} risk=${:.2} pnl={:+.2} bal=${:.2}",
                 outcome, open_price, close_price, stake, pnl_units, self.kelly.balance,
             );
             return Ok(Some((outcome, pnl_units)));
@@ -149,7 +160,7 @@ impl PaperTracker {
         let wr = if total > 0 { wins as f64 / total as f64 * 100.0 } else { 0.0 };
 
         info!("==================================================");
-        info!("  PAPER TRADE SUMMARY");
+        info!("  BULL PAPER TRADE SUMMARY");
         info!("  Balance: ${:.2}  |  ROI: {:+.2}%", self.kelly.balance, self.kelly.roi());
         info!("  PnL: ${:.2}", total_pnl);
         info!("  Bets: {}  Wins: {}  Losses: {}", total, wins, losses);
