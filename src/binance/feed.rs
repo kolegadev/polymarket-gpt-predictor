@@ -8,7 +8,7 @@ use tokio::sync::watch;
 use crate::decision::candle::Candle;
 use crate::db::Db;
 
-const BINANCE_WS: &str = "wss://stream.binance.us:9443/ws/btcusdt@kline_15m";
+const BINANCE_WS: &str = "wss://stream.binance.us:9443/ws/btcusdt@kline_5m";
 
 /// Building candle from the websocket stream.
 #[derive(Debug, Clone, Default)]
@@ -97,7 +97,7 @@ pub async fn spawn_feed(
 async fn bootstrap_history(db: &Db) -> Result<()> {
     // Fetch last 150 candles to warm indicators (need 99 for SMA99 + some buffer)
     info!("Bootstrapping historical candles from Binance REST...");
-    let url = "https://api.binance.us/api/v3/klines?symbol=BTCUSDT&interval=15m&limit=150";
+    let url = "https://api.binance.us/api/v3/klines?symbol=BTCUSDT&interval=5m&limit=60";
     let resp = reqwest::get(url).await?.json::<Vec<Vec<serde_json::Value>>>().await?;
 
     let mut candles = Vec::new();
@@ -158,7 +158,7 @@ async fn connect_and_listen(
             if let Some(b) = building.take() {
                 let candle = Candle {
                     open_time: b.open_time,
-                    close_time: b.open_time + 899_999, // 15min - 1ms
+                    close_time: b.open_time + 299999, // 5min - 1ms
                     open: b.open,
                     high: b.high,
                     low: b.low,

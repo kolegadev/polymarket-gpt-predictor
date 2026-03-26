@@ -3,15 +3,15 @@ use reqwest::Client;
 use serde::Deserialize;
 use tracing::{info, warn};
 
-/// PolyMarket Gamma API client — fetches real odds for BTC 15m UpDown markets.
+/// PolyMarket Gamma API client — fetches real odds for BTC 5m UpDown markets.
 pub struct GammaClient {
     client: Client,
 }
 
 #[derive(Debug, Clone)]
 pub struct MarketOdds {
-    pub yes_price: f64,   // Up price (YES)
-    pub no_price: f64,    // Down price (NO)
+    pub yes_price: f64,
+    pub no_price: f64,
     pub yes_best_bid: f64,
     pub yes_best_ask: f64,
     pub no_best_bid: f64,
@@ -39,12 +39,10 @@ impl GammaClient {
         Self { client: Client::new() }
     }
 
-    /// Fetch odds for a specific 15m block.
-    /// block_open_time_ms: the open_time of the 15m block in milliseconds.
-    /// Tries to hit as close to t=0 as possible.
+    /// Fetch odds for a specific 5m block.
     pub async fn get_odds(&self, block_open_time_ms: i64) -> Result<MarketOdds> {
         let block_secs = block_open_time_ms / 1000;
-        let slug = format!("btc-updown-15m-{}", block_secs);
+        let slug = format!("btc-updown-5m-{}", block_secs);
 
         let url = format!(
             "https://gamma-api.polymarket.com/markets?slug={}&closed=false&limit=1",
@@ -56,13 +54,11 @@ impl GammaClient {
             .timeout(std::time::Duration::from_secs(3))
             .send().await?
             .json().await?;
-        let elapsed = chrono::Utc::now().timestamp_millis() - start;
 
         let market = resp.first()
             .filter(|m| m.accepting_orders.unwrap_or(false))
             .ok_or_else(|| anyhow::anyhow!("No active market for block {}", block_secs))?;
 
-        // outcomePrices: ["Up_price", "Down_price"]
         let yes_price = market.outcome_prices.first()
             .and_then(|s| s.parse::<f64>().ok())
             .unwrap_or(0.505);
@@ -70,17 +66,15 @@ impl GammaClient {
             .and_then(|s| s.parse::<f64>().ok())
             .unwrap_or(0.495);
 
-        // bestBid/bestAsk are for the first (YES/Up) token
-        // NO token is the inverse: NO_bid = 1 - YES_ask, NO_ask = 1 - YES_bid
         let yes_bid = market.best_bid.unwrap_or(yes_price - 0.005);
         let yes_ask = market.best_ask.unwrap_or(yes_price + 0.005);
         let no_bid = 1.0 - yes_ask;
         let no_ask = 1.0 - yes_bid;
-
         let spread = market.spread.unwrap_or(yes_ask - yes_bid);
 
+        let elapsed = chrono::Utc::now().timestamp_millis() - start;
         info!(
-            "CLOB [{:.0}ms] slug={} YES={:.3} NO_bid={:.3} NO_ask={:.3} spread={:.3}",
+            "CLOB [{:.0}ms] {} YES={:.3f} NO_bid={:.3f} NO_ask={:.3f} spread={:.3f}",
             elapsed, slug, yes_price, no_bid, no_ask, spread,
         );
 
