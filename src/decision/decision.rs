@@ -2,15 +2,21 @@
 pub struct Thresholds {
     /// Taker buy ratio threshold for BULL entry (> this = buyers dominate)
     pub bull_ratio: f64,
+    /// Taker buy ratio threshold for BULL exit (< this = neutral/bearish)
+    pub exit_ratio: f64,
     /// Lookback bars for taker ratio calculation
     pub lookback: usize,
+    /// Consecutive bars to confirm entry or exit
+    pub confirm_bars: u32,
 }
 
 impl Default for Thresholds {
     fn default() -> Self {
         Self {
-            bull_ratio: 0.54,  // best threshold from backtest
+            bull_ratio: 0.54,
+            exit_ratio: 0.50,
             lookback: 4,
+            confirm_bars: 2,
         }
     }
 }
@@ -28,20 +34,39 @@ pub fn taker_ratio(candles: &[crate::decision::candle::Candle], t: usize, lookba
 }
 
 /// Evaluate BULL regime on bar t.
-/// Returns (is_bull, taker_ratio, consecutive_count).
+/// Returns (in_bull, taker_ratio, consecutive_bull, consecutive_exit).
+///
+/// Entry:  ratio > bull_ratio for confirm_bars consecutive bars
+/// Exit:   ratio < exit_ratio  for confirm_bars consecutive bars
 pub fn evaluate(
     candles: &[crate::decision::candle::Candle],
     t: usize,
     in_bull: bool,
-    _consec: u32,
+    consec_bull: u32,
+    consec_exit: u32,
     th: &Thresholds,
-) -> (bool, f64, u32) {
+) -> (bool, f64, u32, u32) {
     let ratio = taker_ratio(candles, t, th.lookback);
 
-    let consec = if ratio > th.bull_ratio { _consec + 1 } else { 0 };
+    let (cb, ce) = if in_bull {
+        // Track exit countdown; reset bull consec if ratio is still high
+        let new_ce = if ratio < th.exit_ratio { consec_exit + 1 } else { 0 };
+        let new_cb = if ratio > th.bull_ratio { consec_bull + 1 } else { 0 };
+        (new_cb, new_ce)
+    } else {
+        // Track entry countdown; reset exit consec if ratio is still low
+        let new_cb = if ratio > th.bull_ratio { consec_bull + 1 } else { 0 };
+        let new_ce = if ratio < th.exit_ratio { consec_exit + 1 } else { 0 };
+        (new_cb, new_ce)
+    };
 
-    // BULL entry: ratio > threshold (handled by caller checking consec >= 2)
-    // BULL exit: ratio drops below 0.50 for 2+ bars (handled in main)
+    let now_bull = if in_bull {
+        // Stay in bull unless exit confirmed
+        ce < th.confirm_bars
+    } else {
+        // Enter bull if entry confirmed
+        cb >= th.confirm_bars
+    };
 
-    (in_bull || consec >= 2, ratio, consec)
+    (now_bull, ratio, cb, ce)
 }

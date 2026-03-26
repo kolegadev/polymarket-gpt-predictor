@@ -11,9 +11,11 @@ use clap::Parser;
 use std::sync::Arc;
 use tracing::{info, warn};
 use db::Db;
-use paper::tracker::{PaperTracker, KellySizer};
+use paper::tracker::PaperTracker;
+use binance::feed::FeedEvent;
 use crate::clob::clob::GammaClient;
 use crate::decision::decision::Thresholds;
+use crate::config::config::Args;
 
 const STARTING_BALANCE: f64 = 10_000.00;
 const MAX_BET_PCT: f64 = 0.05;
@@ -58,12 +60,14 @@ async fn main() -> Result<()> {
     let mut rx = binance::feed::spawn_feed(db.clone()).await?;
 
     let mut in_bull = false;
+    let mut consec_bull: u32 = 0;
+    let mut consec_exit: u32 = 0;
     let mut current_stake: f64 = 0.0;
     let mut current_odds: f64 = DEFAULT_ODDS;
     let mut bar_count = 0u32;
 
-    info!("BULL-ONLY 5M PAPER TRADER | taker ratio > {:.2} | lb={} | bal=${:.2}",
-        th.bull_ratio, th.lookback, tracker.kelly.balance);
+    info!("BULL-ONLY 5M PAPER TRADER | entry> {:.2} | exit< {:.2} | lb={} | confirm={} | bal=${:.2}",
+        th.bull_ratio, th.exit_ratio, th.lookback, th.confirm_bars, tracker.kelly.balance);
 
     loop {
         if rx.changed().await.is_err() {
@@ -97,19 +101,21 @@ async fn main() -> Result<()> {
                 if candles.len() < th.lookback + 2 { continue; }
 
                 let t = candles.len() - 1;
-                let (_, ratio, _) = decision::decision::evaluate(
-                    &candles, t, in_bull, 0, &th,
+                let was_bull = in_bull;
+                let (still_bull, ratio, cb, ce) = decision::decision::evaluate(
+                    &candles, t, in_bull, consec_bull, consec_exit, &th,
                 );
 
-                // BULL entry: taker ratio exceeds threshold for 2+ bars
-                if !in_bull && ratio > th.bull_ratio {
-                    info!("BULL ACTIVATED | ratio={:.3}", ratio);
+                if !was_bull && still_bull {
+                    info!("BULL ENTERED | ratio={:.3} consec={}", ratio, cb);
                 }
-                // BULL exit: ratio drops below 0.50 for 2+ bars
-                if in_bull && ratio < 0.50 {
-                    info!("BULL EXITED | ratio={:.3}", ratio);
-                    in_bull = false;
+                if was_bull && !still_bull {
+                    info!("BULL EXITED | ratio={:.3} exit_consec={}", ratio, ce);
                 }
+
+                in_bull = still_bull;
+                consec_bull = cb;
+                consec_exit = ce;
 
                 // 3. Place bet if in BULL
                 if in_bull {
@@ -120,7 +126,7 @@ async fn main() -> Result<()> {
                     ).await {
                         Ok(Ok(m)) => m.yes_best_ask,  // pay ask for YES
                         Ok(Err(e)) => { warn!("CLOB err: {}, using default", e); DEFAULT_ODDS }
-                        Err(_) => { warn!("CLOB timeout"); DEFAULT_ODDS }
+                        Err(_) => { warn!("CLOB timeout, using default"); DEFAULT_ODDS }
                     };
 
                     let stake = tracker.kelly.size(WIN_RATE, odds);
@@ -129,9 +135,12 @@ async fn main() -> Result<()> {
                             next_block_open, next_block_open + 299_999,
                             candle.close, "YES", Some(odds), ratio, stake,
                         )?;
+                        info!("BET YES | block={} stake={:.2} odds={:.3} ratio={:.3}",
+                            next_block_open, stake, odds, ratio);
                         current_stake = stake;
                         current_odds = odds;
                     } else {
+                        info!("SKIP | stake too small ({:.4})", stake);
                         current_stake = 0.0;
                     }
                 } else {
@@ -152,7 +161,7 @@ async fn main() -> Result<()> {
 }
 
 fn simulate_5m(db: &Arc<Db>, tracker: &PaperTracker) -> Result<()> {
-    info!("5m BULL simulation...");
+    info!("5m BULL YES simulation (7-day window)...");
     let candles = db.get_latest_candles(5000)?;
     if candles.len() < 20 {
         anyhow::bail!("Not enough candles");
@@ -163,22 +172,22 @@ fn simulate_5m(db: &Arc<Db>, tracker: &PaperTracker) -> Result<()> {
     let eval_start = start.max(10);
     let total = candles.len() - eval_start - 1;
 
-    info!("Processing {} bars ({:.1f} days)", total, total as f64 / 288.0);
+    info!("Processing {} bars ({:.1} days)", total, total as f64 / 288.0);
 
     let th = Thresholds::default();
     let mut in_bull = false;
+    let mut consec_bull: u32 = 0;
+    let mut consec_exit: u32 = 0;
     let mut bets = 0u32;
     let mut wins = 0u32;
 
     for t in eval_start..candles.len() - 1 {
-        let (_, ratio, _) = decision::decision::evaluate(&candles, t, in_bull, 0, &th);
-
-        if !in_bull && ratio > th.bull_ratio {
-            in_bull = true;
-        }
-        if in_bull && ratio < 0.50 {
-            in_bull = false;
-        }
+        let (still_bull, ratio, cb, ce) = decision::decision::evaluate(
+            &candles, t, in_bull, consec_bull, consec_exit, &th,
+        );
+        in_bull = still_bull;
+        consec_bull = cb;
+        consec_exit = ce;
 
         if in_bull {
             let next = &candles[t + 1];
@@ -199,7 +208,8 @@ fn simulate_5m(db: &Arc<Db>, tracker: &PaperTracker) -> Result<()> {
         }
     }
 
-    info!("SIMULATION: {} bets, {} wins ({:.1}%)", bets, wins, if bets > 0 { wins as f64 / bets as f64 * 100.0 } else { 0.0 });
+    info!("SIMULATION: {} bets, {} wins ({:.1}%)",
+        bets, wins, if bets > 0 { wins as f64 / bets as f64 * 100.0 } else { 0.0 });
     tracker.print_summary()?;
     Ok(())
 }

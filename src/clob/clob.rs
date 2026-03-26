@@ -74,7 +74,7 @@ impl GammaClient {
 
         let elapsed = chrono::Utc::now().timestamp_millis() - start;
         info!(
-            "CLOB [{:.0}ms] {} YES={:.3f} NO_bid={:.3f} NO_ask={:.3f} spread={:.3f}",
+            "CLOB [{:.0}ms] {} YES={:.3} NO_bid={:.3} NO_ask={:.3} spread={:.3}",
             elapsed, slug, yes_price, no_bid, no_ask, spread,
         );
 
