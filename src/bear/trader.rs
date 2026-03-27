@@ -174,6 +174,30 @@ impl BearDb {
         }
     }
 
+    /// Compute price momentum as % change over last N bars ending at candle_open_time.
+    pub fn momentum_pct(&self, candle_open_time: i64, lookback: usize) -> Result<Option<f64>> {
+        let conn = self.conn.lock().unwrap();
+        let start_time = candle_open_time - (lookback as i64 - 1) * 300_000;
+        let mut stmt = conn.prepare(
+            "SELECT open FROM candles WHERE open_time = ?1
+             UNION ALL
+             SELECT close FROM candles WHERE open_time = ?2"
+        )?;
+        let mut rows = stmt.query_map(params![start_time, candle_open_time], |row| {
+            Ok(row.get::<_, f64>(0)?)
+        })?;
+        let start_price: f64 = match rows.next() {
+            Some(r) => r?,
+            None => return Ok(None),
+        };
+        let end_price: f64 = match rows.next() {
+            Some(r) => r?,
+            None => return Ok(None),
+        };
+        if start_price < 1e-10 { return Ok(None); }
+        Ok(Some((end_price - start_price) / start_price * 100.0))
+    }
+
     /// Get the latest closed candle (close_time < now_ms)
     pub fn get_latest_closed_candle(&self, now_ms: i64) -> Result<Option<CandleInfo>> {
         let conn = self.conn.lock().unwrap();

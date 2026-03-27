@@ -3,18 +3,28 @@ mod bear;
 use anyhow::Result;
 use clap::Parser;
 use std::sync::Arc;
-use tracing::{info, warn, error};
+use tracing::{info, warn};
 use bear::trader::{BearDb, BearTrade};
 
 const STARTING_BALANCE: f64 = 10_000.00;
 const MAX_BET_PCT: f64 = 0.05;
 const DEFAULT_ODDS: f64 = 0.505;
-const WIN_RATE: f64 = 0.555;
+const POLY_FEE: f64 = 0.03;
 const POLL_INTERVAL_SECS: u64 = 10;
 const SUMMARY_BARS: u32 = 288; // 1 day
 
+// BEAR v3: 1h Momentum Mean Reversion (no taker filter)
+// Best backtested config: 55.8% WR, +$11,290 on 1,513 bets over 45 days
+// When price moved > 0.8% over the last 1h (12 × 5m candles),
+// bet OPPOSITE direction (mean reversion).
+const MOM_LOOKBACK: usize = 12;  // 12 × 5min = 1 hour
+const MOM_THRESHOLD: f64 = 0.8;  // 0.8% move triggers a signal
+
+// Win rate for Kelly sizing (backtested 55.8%)
+const WIN_RATE: f64 = 0.558;
+
 #[derive(Parser, Debug)]
-#[command(name = "bear_trader", about = "OBI-based BEAR paper trader")]
+#[command(name = "bear_trader", about = "BEAR v3: 1h momentum mean-reversion paper trader")]
 struct Args {
     #[arg(long, default_value = "data/predictor.db")]
     db_path: String,
@@ -41,28 +51,20 @@ fn kelly_stake(balance: f64, win_rate: f64, odds: f64) -> f64 {
     raw.min(max)
 }
 
-/// BEAR v2 strategy: OBI zones + taker ratio validation
+/// BEAR v3 strategy: 1h momentum mean reversion
 /// Returns (decision, reason)
-fn decide(obi5_avg: f64, obi5_momentum: f64, taker_ratio: f64) -> (&'static str, &'static str) {
-    let bear_taker = 0.45;  // taker below this = selling pressure
-    let bull_taker = 0.65;  // taker above this = strong buying pressure
-
-    // YES bets: exhaustion bounce zone + confirmed buying
-    if obi5_avg >= -0.41 && obi5_avg < -0.35 && taker_ratio >= bull_taker {
-        return ("YES", "bounce zone + taker confirms buying");
+fn decide(momentum_pct: f64, _taker_ratio: f64) -> (&'static str, String) {
+    if momentum_pct.abs() < MOM_THRESHOLD {
+        return ("SKIP", format!("no edge (1h mom {:+.2}% < ±{:.1}%)", momentum_pct, MOM_THRESHOLD));
     }
 
-    // NO bets: neutral OBI + bearish taker (real selling flow)
-    if obi5_avg >= -0.35 && taker_ratio < bear_taker {
-        return ("NO", "neutral OBI + bearish taker flow");
+    if momentum_pct > MOM_THRESHOLD {
+        // 1h bullish move → bet DOWN (mean reversion)
+        ("NO", format!("1h mom +{:.2}% → mean reversion DOWN", momentum_pct))
+    } else {
+        // 1h bearish move → bet UP (mean reversion)
+        ("YES", format!("1h mom {:+.2}% → mean reversion UP", momentum_pct))
     }
-
-    // NO bets: fake OBI bounce + bearish taker
-    if obi5_momentum > 0.1 && taker_ratio < bear_taker {
-        return ("NO", "fake OBI bounce + bearish taker flow");
-    }
-
-    ("SKIP", "no edge")
 }
 
 #[tokio::main]
@@ -93,7 +95,7 @@ async fn main() -> Result<()> {
     }
 
     let mut balance = db.get_balance(args.balance)?;
-    info!("🐻 BEAR TRADER v2 started | balance=${:.2} | OBI + Taker strategy", balance);
+    info!("🐻 BEAR v3 started | balance=${:.2} | 1h mom ±{:.1}% mean-reversion (no taker filter)", balance, MOM_THRESHOLD);
 
     // Resolve any pending trades first
     resolve_pending(&db, &mut balance)?;
@@ -106,10 +108,10 @@ async fn main() -> Result<()> {
 
         let now_ms = chrono::Utc::now().timestamp_millis();
 
-        // Resolve pending trades first
+        // Resolve pending trades
         resolve_pending(&db, &mut balance)?;
 
-        // Check for new candle
+        // Get latest closed candle
         let candle = match db.get_latest_closed_candle(now_ms)? {
             Some(c) => c,
             None => continue,
@@ -119,7 +121,7 @@ async fn main() -> Result<()> {
             continue;
         }
 
-        // Check if we already traded this candle
+        // Skip if we already traded this candle
         if db.has_trade_for_candle(candle.open_time)? {
             last_candle_open = candle.open_time;
             continue;
@@ -127,50 +129,32 @@ async fn main() -> Result<()> {
 
         last_candle_open = candle.open_time;
 
-        // Get OBI data
-        let obi = match db.get_obi_for_candle(candle.open_time)? {
-            Some(o) if o.count >= 10 => o,
-            _ => {
-                info!("Candle {} — insufficient OBI data, SKIP", candle.open_time);
-                db.insert_trade(&BearTrade {
-                    id: None,
-                    candle_open_time: candle.open_time,
-                    decision: "SKIP".into(),
-                    obi5: 0.0, obi10: 0.0, obi20: 0.0,
-                    obi5_late: None, obi5_early: None, obi5_momentum: None,
-                    bid_ask_ratio_5: None, spread: None,
-                    stake: 0.0, odds: DEFAULT_ODDS,
-                    entry_price: Some(candle.close),
-                    exit_price: None, outcome: None, pnl: None,
-                    balance_at_entry: balance,
-                })?;
+        // Compute 1h momentum (price change over last 12 candles)
+        let momentum = match db.momentum_pct(candle.open_time, MOM_LOOKBACK)? {
+            Some(m) => m,
+            None => {
+                info!("Candle {} — insufficient history for momentum, SKIP", candle.open_time);
+                skip_candle(&db, candle.open_time, 0.0, 0.0, balance)?;
                 continue;
             }
         };
 
-        // Compute OBI momentum (late - early)
-        let obi_momentum = match (obi.obi5_late, obi.obi5_early) {
-            (Some(late), Some(early)) => late - early,
-            _ => 0.0,
-        };
+        let taker = db.taker_ratio(candle.open_time, 4)?; // logged for analysis, not used in decision
 
-        // Get taker ratio (4-bar lookback)
-        let taker = db.taker_ratio(candle.open_time, 4)?;
-
-        let (decision, reason) = decide(obi.obi5_avg, obi_momentum, taker);
+        let (decision, reason) = decide(momentum, taker);
 
         let trade = BearTrade {
             id: None,
             candle_open_time: candle.open_time,
             decision: decision.into(),
-            obi5: obi.obi5_avg,
-            obi10: obi.obi10_avg,
-            obi20: obi.obi20_avg,
-            obi5_late: obi.obi5_late,
-            obi5_early: obi.obi5_early,
-            obi5_momentum: Some(obi_momentum),
-            bid_ask_ratio_5: if obi.ask_vol5_avg > 0.0 { Some(obi.bid_vol5_avg / obi.ask_vol5_avg) } else { None },
-            spread: Some(obi.spread_avg),
+            obi5: momentum,      // repurpose obi5 to store momentum %
+            obi10: 0.0,
+            obi20: 0.0,
+            obi5_late: Some(taker), // repurpose to store taker ratio
+            obi5_early: None,
+            obi5_momentum: None,
+            bid_ask_ratio_5: None,
+            spread: None,
             stake: if decision == "SKIP" { 0.0 } else { kelly_stake(balance, WIN_RATE, DEFAULT_ODDS) },
             odds: DEFAULT_ODDS,
             entry_price: Some(candle.close),
@@ -183,10 +167,11 @@ async fn main() -> Result<()> {
         let trade_id = db.insert_trade(&trade)?;
 
         if decision == "SKIP" {
-            info!("Candle {} — OBI5={:.4} Taker={:.3} → SKIP ({})", candle.open_time, obi.obi5_avg, taker, reason);
+            info!("Candle {} — 1h_mom={:+.3}% taker={:.3} → SKIP ({})", 
+                candle.open_time, momentum, taker, reason);
         } else {
-            info!("Candle {} — OBI5={:.4} Taker={:.3} Mom={:+.4} → {} | stake=${:.2} @ {:.3}x | {}",
-                candle.open_time, obi.obi5_avg, taker, obi_momentum, decision, trade.stake, DEFAULT_ODDS, reason);
+            info!("Candle {} — 1h_mom={:+.3}% taker={:.3} → {} | stake=${:.2} @ {:.3}x | {}",
+                candle.open_time, momentum, taker, decision, trade.stake, DEFAULT_ODDS, reason);
         }
 
         bar_count += 1;
@@ -196,21 +181,35 @@ async fn main() -> Result<()> {
     }
 }
 
+fn skip_candle(db: &BearDb, candle_open_time: i64, mom: f64, taker: f64, balance: f64) -> Result<()> {
+    db.insert_trade(&BearTrade {
+        id: None,
+        candle_open_time,
+        decision: "SKIP".into(),
+        obi5: mom,
+        obi10: 0.0, obi20: 0.0,
+        obi5_late: Some(taker),
+        obi5_early: None, obi5_momentum: None,
+        bid_ask_ratio_5: None, spread: None,
+        stake: 0.0, odds: DEFAULT_ODDS,
+        entry_price: None,
+        exit_price: None, outcome: None, pnl: None,
+        balance_at_entry: balance,
+    })?;
+    Ok(())
+}
+
 fn resolve_pending(db: &BearDb, balance: &mut f64) -> Result<()> {
     let trades = db.get_unresolved_trades()?;
     let now_ms = chrono::Utc::now().timestamp_millis();
 
     for mut trade in trades {
-        // The next candle after this trade's candle
-        // Next candle open_time = trade.candle_open_time + 300_000
         let next_open_time = trade.candle_open_time + 300_000;
 
         let next_candle = match db.get_candle(next_open_time)? {
             Some(c) => c,
             None => {
-                // Not enough time passed yet
                 if now_ms > next_open_time + 600_000 {
-                    // 10 min after expected close, still no candle — skip
                     warn!("Trade {} — next candle {} not found after 10min, marking SKIP", trade.id.unwrap(), next_open_time);
                     db.update_trade_outcome(trade.id.unwrap(), "SKIP", 0.0, 0.0)?;
                     continue;
@@ -219,10 +218,7 @@ fn resolve_pending(db: &BearDb, balance: &mut f64) -> Result<()> {
             }
         };
 
-        // Skip if next candle has zero volume (data gap, not real price action)
-        let next_open = next_candle.open;
-        let next_close = next_candle.close;
-        // Check volume from candles table
+        // Skip if next candle has zero volume (data gap)
         let next_has_vol = {
             let conn = db.conn.lock().unwrap();
             let vol: f64 = conn.query_row(
@@ -237,19 +233,36 @@ fn resolve_pending(db: &BearDb, balance: &mut f64) -> Result<()> {
             continue;
         }
 
-        let went_up = next_close > next_open;
+        let next_open = next_candle.open;
+        let next_close = next_candle.close;
 
+        // FLAT candle (open == close) → SKIP
+        if (next_close - next_open).abs() < 0.01 {
+            warn!("Trade {} — next candle is FLAT, marking SKIP", trade.id.unwrap());
+            db.update_trade_outcome(trade.id.unwrap(), "SKIP", 0.0, next_close)?;
+            continue;
+        }
+
+        let went_up = next_close > next_open;
         let won = (trade.decision == "YES" && went_up) || (trade.decision == "NO" && !went_up);
-        let outcome = if won { "WIN" } else { "LOSS" };
-        let pnl = if won { trade.stake / DEFAULT_ODDS - trade.stake } else { -trade.stake };
+
+        // PnL includes 3% PolyMarket fee
+        let pnl = if won {
+            let gross = trade.stake / DEFAULT_ODDS - trade.stake;
+            let fee = trade.stake * POLY_FEE;
+            gross - fee
+        } else {
+            -trade.stake - trade.stake * POLY_FEE
+        };
 
         *balance += pnl;
         db.set_balance(*balance)?;
-        db.update_trade_outcome(trade.id.unwrap(), outcome, pnl, next_close)?;
+        db.update_trade_outcome(trade.id.unwrap(), if won { "WIN" } else { "LOSS" }, pnl, next_close)?;
 
         let emoji = if won { "✅" } else { "❌" };
-        info!("{} Trade {} resolved: {} {} | PnL=${:.2} | bal=${:.2} | OBI5={:.4}",
-            emoji, trade.id.unwrap(), trade.decision, outcome, pnl, *balance, trade.obi5);
+        info!("{} Trade {} resolved: {} {} | PnL=${:.2} | bal=${:.2} | mom={:+.3}%",
+            emoji, trade.id.unwrap(), trade.decision, if won { "WIN" } else { "LOSS" }, 
+            pnl, *balance, trade.obi5);
     }
 
     Ok(())
