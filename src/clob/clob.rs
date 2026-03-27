@@ -22,6 +22,7 @@ pub struct MarketOdds {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct MarketResponse {
     slug: String,
     outcome_prices: Vec<String>,

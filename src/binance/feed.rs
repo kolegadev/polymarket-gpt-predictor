@@ -8,7 +8,7 @@ use tokio::sync::watch;
 use crate::decision::candle::Candle;
 use crate::db::Db;
 
-const BINANCE_WS: &str = "wss://stream.binance.us:9443/ws/btcusdt@kline_5m";
+const BINANCE_WS: &str = "wss://stream.binance.com:9443/ws/btcusdt@kline_5m";
 const BINANCE_REST_KLINES: &str = "https://data-api.binance.vision/api/v3/klines?symbol=BTCUSDT&interval=5m&limit=2";
 const WS_IDLE_TIMEOUT_SECS: u64 = 30;
 const REST_POLL_INTERVAL_SECS: u64 = 5;
