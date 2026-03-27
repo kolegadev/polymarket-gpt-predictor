@@ -139,8 +139,11 @@ impl PaperTracker {
             // Update Kelly balance
             self.kelly.settle(stake, won, odds);
 
-            // Persist balance to DB
-            let _ = self.db.set_balance(self.kelly.balance);
+            // Persist balance to DB (using already-held conn to avoid deadlock)
+            conn.execute(
+                "INSERT OR REPLACE INTO account_state (key, value, updated_at) VALUES ('balance', ?1, datetime('now'))",
+                params![self.kelly.balance],
+            )?;
 
             info!(
                 "  {} open={:.2} close={:.2} risk=${:.2} pnl={:+.2} bal=${:.2}",

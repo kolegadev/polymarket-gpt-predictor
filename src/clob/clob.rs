@@ -1,6 +1,7 @@
 use anyhow::Result;
 use reqwest::Client;
 use serde::Deserialize;
+use serde::de::Error as _;
 use tracing::{info, warn};
 
 /// PolyMarket Gamma API client — fetches real odds for BTC 5m UpDown markets.
@@ -25,14 +26,22 @@ pub struct MarketOdds {
 #[serde(rename_all = "camelCase")]
 struct MarketResponse {
     slug: String,
+    #[serde(deserialize_with = "json_string_vec")]
     outcome_prices: Vec<String>,
+    #[serde(deserialize_with = "json_string_vec")]
     clob_token_ids: Vec<String>,
     best_bid: Option<f64>,
     best_ask: Option<f64>,
     spread: Option<f64>,
-    outcomes: Option<Vec<String>>,
+    outcomes: Option<String>,
     accepting_orders: Option<bool>,
     volume: Option<String>,
+}
+
+fn json_string_vec<'de, D>(deserializer: D) -> Result<Vec<String>, D::Error>
+where D: serde::Deserializer<'de> {
+    let s = String::deserialize(deserializer)?;
+    serde_json::from_str(&s).map_err(serde::de::Error::custom)
 }
 
 impl GammaClient {
