@@ -247,7 +247,7 @@ async fn bootstrap_5m(db: &Arc<Db>) -> Result<()> {
     let mut end: Option<i64> = None;
 
     for _ in 0..5 {
-        let mut url = "https://api.binance.us/api/v3/klines?symbol=BTCUSDT&interval=5m&limit=1000".to_string();
+        let mut url = "https://data-api.binance.vision/api/v3/klines?symbol=BTCUSDT&interval=5m&limit=1000".to_string();
         if let Some(et) = end {
             url.push_str(&format!("&endTime={}", et));
         }
@@ -258,6 +258,8 @@ async fn bootstrap_5m(db: &Arc<Db>) -> Result<()> {
         let first_open = resp[0][0].as_i64().unwrap_or(0);
         for r in &resp {
             if r.len() < 10 { continue; }
+            let vol: f64 = r[5].as_str().unwrap_or("0").parse().unwrap_or(0.0);
+            if vol == 0.0 { continue; } // Skip zero-volume candles (data gaps)
             all.push(crate::decision::candle::Candle {
                 open_time: r[0].as_i64().unwrap_or(0),
                 close_time: r[6].as_i64().unwrap_or(0),
@@ -265,7 +267,7 @@ async fn bootstrap_5m(db: &Arc<Db>) -> Result<()> {
                 high: r[2].as_str().unwrap_or("0").parse().unwrap_or(0.0),
                 low: r[3].as_str().unwrap_or("0").parse().unwrap_or(0.0),
                 close: r[4].as_str().unwrap_or("0").parse().unwrap_or(0.0),
-                volume: r[5].as_str().unwrap_or("0").parse().unwrap_or(0.0),
+                volume: vol,
                 taker_buy_vol: r[9].as_str().unwrap_or("0").parse().unwrap_or(0.0),
                 trades: r[8].as_u64().unwrap_or(0) as u32,
             });
@@ -299,7 +301,7 @@ async fn expand_historical_data(db: &Arc<Db>) -> Result<()> {
 
     loop {
         let url = format!(
-            "https://api.binance.us/api/v3/klines?symbol=BTCUSDT&interval=5m&limit=1000&endTime={}",
+            "https://data-api.binance.vision/api/v3/klines?symbol=BTCUSDT&interval=5m&limit=1000&endTime={}",
             end
         );
 
@@ -325,6 +327,8 @@ async fn expand_historical_data(db: &Arc<Db>) -> Result<()> {
         let mut candles = Vec::new();
         for r in &resp {
             if r.len() < 10 { continue; }
+            let vol: f64 = r[5].as_str().unwrap_or("0").parse().unwrap_or(0.0);
+            if vol == 0.0 { continue; } // Skip zero-volume candles (data gaps)
             candles.push(crate::decision::candle::Candle {
                 open_time: r[0].as_i64().unwrap_or(0),
                 close_time: r[6].as_i64().unwrap_or(0),
@@ -332,7 +336,7 @@ async fn expand_historical_data(db: &Arc<Db>) -> Result<()> {
                 high: r[2].as_str().unwrap_or("0").parse().unwrap_or(0.0),
                 low: r[3].as_str().unwrap_or("0").parse().unwrap_or(0.0),
                 close: r[4].as_str().unwrap_or("0").parse().unwrap_or(0.0),
-                volume: r[5].as_str().unwrap_or("0").parse().unwrap_or(0.0),
+                volume: vol,
                 taker_buy_vol: r[9].as_str().unwrap_or("0").parse().unwrap_or(0.0),
                 trades: r[8].as_u64().unwrap_or(0) as u32,
             });

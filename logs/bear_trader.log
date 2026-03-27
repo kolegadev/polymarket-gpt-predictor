@@ -232,3 +232,23 @@
 [2m2026-03-27T05:55:42.778651Z[0m [32m INFO[0m [2mbear_trader[0m[2m:[0m ✅ Trade 116 resolved: YES WIN | PnL=$66.50 | bal=$1423.29 | OBI5=-0.3966
 [2m2026-03-27T06:00:03.099301Z[0m [32m INFO[0m [2mbear_trader[0m[2m:[0m Candle 1774590900000 — OBI5=-0.5519 Taker=0.973 → SKIP (no edge)
 [2m2026-03-27T06:00:43.136757Z[0m [32m INFO[0m [2mbear_trader[0m[2m:[0m ❌ Trade 117 resolved: SKIP LOSS | PnL=$-0.00 | bal=$1423.29 | OBI5=-0.5519
+[2m2026-03-27T06:05:03.461293Z[0m [32m INFO[0m [2mbear_trader[0m[2m:[0m Candle 1774591200000 — OBI5=-0.4795 Taker=0.881 → SKIP (no edge)
+[2m2026-03-27T06:05:43.498058Z[0m [32m INFO[0m [2mbear_trader[0m[2m:[0m ❌ Trade 118 resolved: SKIP LOSS | PnL=$-0.00 | bal=$1423.29 | OBI5=-0.4795
+[2m2026-03-27T06:10:03.824822Z[0m [32m INFO[0m [2mbear_trader[0m[2m:[0m Candle 1774591500000 — OBI5=-0.3968 Taker=0.984 Mom=+0.1881 → YES | stake=$71.16 @ 0.505x | bounce zone + taker confirms buying
+[2m2026-03-27T06:10:43.865180Z[0m [32m INFO[0m [2mbear_trader[0m[2m:[0m ✅ Trade 119 resolved: YES WIN | PnL=$69.76 | bal=$1493.04 | OBI5=-0.3968
+[2m2026-03-27T06:15:04.198162Z[0m [32m INFO[0m [2mbear_trader[0m[2m:[0m Candle 1774591800000 — OBI5=-0.4359 Taker=0.986 → SKIP (no edge)
+[2m2026-03-27T06:15:44.237347Z[0m [32m INFO[0m [2mbear_trader[0m[2m:[0m ❌ Trade 120 resolved: SKIP LOSS | PnL=$-0.00 | bal=$1493.04 | OBI5=-0.4359
+[2m2026-03-27T06:20:04.559798Z[0m [32m INFO[0m [2mbear_trader[0m[2m:[0m Candle 1774592100000 — OBI5=-0.5429 Taker=1.000 → SKIP (no edge)
+[2m2026-03-27T06:20:44.600233Z[0m [32m INFO[0m [2mbear_trader[0m[2m:[0m ❌ Trade 121 resolved: SKIP LOSS | PnL=$-0.00 | bal=$1493.04 | OBI5=-0.5429
+[2m2026-03-27T06:25:08.771678Z[0m [32m INFO[0m [2mbear_trader[0m[2m:[0m Candle 1774592400000 — OBI5=-0.5435 Taker=1.000 → SKIP (no edge)
+[2m2026-03-27T06:25:50.787032Z[0m [32m INFO[0m [2mbear_trader[0m[2m:[0m ❌ Trade 122 resolved: SKIP LOSS | PnL=$-0.00 | bal=$1493.04 | OBI5=-0.5435
+[2m2026-03-27T06:30:01.113945Z[0m [32m INFO[0m [2mbear_trader[0m[2m:[0m Candle 1774592700000 — OBI5=-0.5177 Taker=0.021 Mom=+0.3769 → NO | stake=$74.65 @ 0.505x | fake OBI bounce + bearish taker flow
+[2m2026-03-27T06:30:51.161302Z[0m [32m INFO[0m [2mbear_trader[0m[2m:[0m ❌ Trade 123 resolved: NO LOSS | PnL=$-74.65 | bal=$1418.39 | OBI5=-0.5177
+[2m2026-03-27T06:35:01.478588Z[0m [32m INFO[0m [2mbear_trader[0m[2m:[0m Candle 1774593000000 — OBI5=-0.4081 Taker=0.003 → SKIP (no edge)
+[2m2026-03-27T06:35:51.531183Z[0m [32m INFO[0m [2mbear_trader[0m[2m:[0m ❌ Trade 124 resolved: SKIP LOSS | PnL=$-0.00 | bal=$1418.39 | OBI5=-0.4081
+[2m2026-03-27T06:40:01.825996Z[0m [32m INFO[0m [2mbear_trader[0m[2m:[0m Candle 1774593300000 — OBI5=-0.4047 Taker=0.003 → SKIP (no edge)
+[2m2026-03-27T06:40:51.874735Z[0m [32m INFO[0m [2mbear_trader[0m[2m:[0m ❌ Trade 125 resolved: SKIP LOSS | PnL=$-0.00 | bal=$1418.39 | OBI5=-0.4047
+[2m2026-03-27T06:45:02.200097Z[0m [32m INFO[0m [2mbear_trader[0m[2m:[0m Candle 1774593600000 — OBI5=-0.3584 Taker=0.003 Mom=+0.2138 → NO | stake=$70.92 @ 0.505x | fake OBI bounce + bearish taker flow
+[2m2026-03-27T06:45:52.251108Z[0m [32m INFO[0m [2mbear_trader[0m[2m:[0m ❌ Trade 126 resolved: NO LOSS | PnL=$-70.92 | bal=$1347.47 | OBI5=-0.3584
+[2m2026-03-27T06:50:02.605967Z[0m [32m INFO[0m [2mbear_trader[0m[2m:[0m Candle 1774593900000 — OBI5=-0.4349 Taker=0.554 → SKIP (no edge)
+[2m2026-03-27T06:50:22.620576Z[0m [32m INFO[0m [2mbear_trader[0m[2m:[0m ❌ Trade 127 resolved: SKIP LOSS | PnL=$-0.00 | bal=$1347.47 | OBI5=-0.4349

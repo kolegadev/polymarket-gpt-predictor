@@ -107,3 +107,14 @@
 [2m2026-03-27T05:50:00.536353Z[0m [32m INFO[0m [2mpolymarket_gpt_predictor::binance::obi[0m[2m:[0m OBI progress: total=43462 this_candle=1 candle_time=5915302
 [2m2026-03-27T05:55:00.539443Z[0m [32m INFO[0m [2mpolymarket_gpt_predictor::binance::obi[0m[2m:[0m OBI progress: total=43762 this_candle=1 candle_time=5915303
 [2m2026-03-27T06:00:00.678078Z[0m [32m INFO[0m [2mpolymarket_gpt_predictor::binance::obi[0m[2m:[0m OBI progress: total=44062 this_candle=1 candle_time=5915304
+[2m2026-03-27T06:05:00.556211Z[0m [32m INFO[0m [2mpolymarket_gpt_predictor::binance::obi[0m[2m:[0m OBI progress: total=44362 this_candle=1 candle_time=5915305
+[2m2026-03-27T06:10:00.659809Z[0m [32m INFO[0m [2mpolymarket_gpt_predictor::binance::obi[0m[2m:[0m OBI progress: total=44662 this_candle=1 candle_time=5915306
+[2m2026-03-27T06:15:00.817652Z[0m [32m INFO[0m [2mpolymarket_gpt_predictor::binance::obi[0m[2m:[0m OBI progress: total=44962 this_candle=1 candle_time=5915307
+[2m2026-03-27T06:20:00.567694Z[0m [32m INFO[0m [2mpolymarket_gpt_predictor::binance::obi[0m[2m:[0m OBI progress: total=45262 this_candle=1 candle_time=5915308
+[2m2026-03-27T06:25:02.060559Z[0m [32m INFO[0m [2mpolymarket_gpt_predictor::binance::obi[0m[2m:[0m OBI progress: total=45561 this_candle=1 candle_time=5915309
+[2m2026-03-27T06:30:00.581016Z[0m [32m INFO[0m [2mpolymarket_gpt_predictor::binance::obi[0m[2m:[0m OBI progress: total=45862 this_candle=1 candle_time=5915310
+[2m2026-03-27T06:35:00.713031Z[0m [32m INFO[0m [2mpolymarket_gpt_predictor::binance::obi[0m[2m:[0m OBI progress: total=46162 this_candle=1 candle_time=5915311
+[2m2026-03-27T06:40:00.719427Z[0m [32m INFO[0m [2mpolymarket_gpt_predictor::binance::obi[0m[2m:[0m OBI progress: total=46462 this_candle=1 candle_time=5915312
+[2m2026-03-27T06:45:00.852082Z[0m [32m INFO[0m [2mpolymarket_gpt_predictor::binance::obi[0m[2m:[0m OBI progress: total=46762 this_candle=1 candle_time=5915313
+[2m2026-03-27T06:50:21.285946Z[0m [32m INFO[0m [2mpolymarket_gpt_predictor[0m[2m:[0m Starting OBI collector (1s intervals)...
+[2m2026-03-27T06:50:21.286116Z[0m [32m INFO[0m [2mpolymarket_gpt_predictor::binance::obi[0m[2m:[0m OBI collector started (every 1s)

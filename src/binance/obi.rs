@@ -50,7 +50,7 @@ pub struct ObiSnapshot {
 }
 
 pub async fn fetch_depth_snapshot() -> Result<ObiSnapshot> {
-    let url = "https://api.binance.us/api/v3/depth?symbol=BTCUSDT&limit=20";
+    let url = "https://data-api.binance.vision/api/v3/depth?symbol=BTCUSDT&limit=20";
     let resp: DepthResponse = reqwest::get(url).await?.json().await?;
     let ts = chrono::Utc::now().timestamp_millis();
 
@@ -96,12 +96,15 @@ fn obi(bid: f64, ask: f64) -> f64 {
 
 /// Fetch latest 5m candles from Binance REST and upsert into DB.
 async fn sync_candles(db: &std::sync::Arc<crate::db::Db>) -> Result<()> {
-    let url = "https://api.binance.us/api/v3/klines?symbol=BTCUSDT&interval=5m&limit=10";
+    let url = "https://data-api.binance.vision/api/v3/klines?symbol=BTCUSDT&interval=5m&limit=10";
     let resp: Vec<Vec<serde_json::Value>> = reqwest::get(url).await?.json().await?;
 
     let conn = db.conn.lock().unwrap();
     for row in &resp {
         if row.len() < 10 { continue; }
+        let vol: f64 = row[5].as_str().unwrap_or("0").parse().unwrap_or(0.0);
+        if vol == 0.0 { continue; } // Skip zero-volume candles
+
         let open_time = row[0].as_i64().unwrap_or(0);
         let close_time = row[6].as_i64().unwrap_or(0);
         conn.execute(

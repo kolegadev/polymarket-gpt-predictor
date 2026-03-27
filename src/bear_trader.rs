@@ -219,9 +219,25 @@ fn resolve_pending(db: &BearDb, balance: &mut f64) -> Result<()> {
             }
         };
 
+        // Skip if next candle has zero volume (data gap, not real price action)
         let next_open = next_candle.open;
         let next_close = next_candle.close;
-        let went_up = next_close >= next_open;
+        // Check volume from candles table
+        let next_has_vol = {
+            let conn = db.conn.lock().unwrap();
+            let vol: f64 = conn.query_row(
+                "SELECT COALESCE(volume, 0) FROM candles WHERE open_time = ?1",
+                rusqlite::params![next_open_time], |r| r.get(0)
+            ).unwrap_or(0.0);
+            vol > 0.0
+        };
+        if !next_has_vol {
+            warn!("Trade {} — next candle {} has zero volume (data gap), marking SKIP", trade.id.unwrap(), next_open_time);
+            db.update_trade_outcome(trade.id.unwrap(), "SKIP", 0.0, 0.0)?;
+            continue;
+        }
+
+        let went_up = next_close > next_open;
 
         let won = (trade.decision == "YES" && went_up) || (trade.decision == "NO" && !went_up);
         let outcome = if won { "WIN" } else { "LOSS" };

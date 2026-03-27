@@ -9,7 +9,7 @@ use crate::decision::candle::Candle;
 use crate::db::Db;
 
 const BINANCE_WS: &str = "wss://stream.binance.us:9443/ws/btcusdt@kline_5m";
-const BINANCE_REST_KLINES: &str = "https://api.binance.us/api/v3/klines?symbol=BTCUSDT&interval=5m&limit=2";
+const BINANCE_REST_KLINES: &str = "https://data-api.binance.vision/api/v3/klines?symbol=BTCUSDT&interval=5m&limit=2";
 const WS_IDLE_TIMEOUT_SECS: u64 = 30;
 const REST_POLL_INTERVAL_SECS: u64 = 5;
 const MAX_WS_CONSECUTIVE_FAILURES: u32 = 3;
@@ -122,7 +122,7 @@ pub async fn spawn_feed(
 async fn bootstrap_history(db: &Db) -> Result<()> {
     // Fetch last 150 candles to warm indicators (need 99 for SMA99 + some buffer)
     info!("Bootstrapping historical candles from Binance REST...");
-    let url = "https://api.binance.us/api/v3/klines?symbol=BTCUSDT&interval=5m&limit=60";
+    let url = "https://data-api.binance.vision/api/v3/klines?symbol=BTCUSDT&interval=5m&limit=60";
     let resp = reqwest::get(url).await?.json::<Vec<Vec<serde_json::Value>>>().await?;
 
     let mut candles = Vec::new();
@@ -286,6 +286,9 @@ async fn rest_poll_loop(
 
         for row in &resp {
             if row.len() < 10 { continue; }
+            let vol: f64 = row[5].as_str().unwrap_or("0").parse().unwrap_or(0.0);
+            if vol == 0.0 { continue; } // Skip zero-volume candles (Binance.US data gaps)
+
             let candle = Candle {
                 open_time: row[0].as_i64().unwrap_or(0),
                 close_time: row[6].as_i64().unwrap_or(0),
@@ -293,7 +296,7 @@ async fn rest_poll_loop(
                 high: row[2].as_str().unwrap_or("0").parse().unwrap_or(0.0),
                 low: row[3].as_str().unwrap_or("0").parse().unwrap_or(0.0),
                 close: row[4].as_str().unwrap_or("0").parse().unwrap_or(0.0),
-                volume: row[5].as_str().unwrap_or("0").parse().unwrap_or(0.0),
+                volume: vol,
                 taker_buy_vol: row[9].as_str().unwrap_or("0").parse().unwrap_or(0.0),
                 trades: row[8].as_u64().unwrap_or(0) as u32,
             };
