@@ -12,3 +12,6 @@
 [2m2026-03-27T09:05:00.236003Z[0m [32m INFO[0m [2mbear_trader[0m[2m:[0m Candle 1774602000000 — 1h_mom=-1.128% taker=0.473 → YES | stake=$571.00 @ 0.505x | 1h mom -1.13% → mean reversion UP
 [2m2026-03-27T09:05:40.270598Z[0m [32m INFO[0m [2mbear_trader[0m[2m:[0m ❌ Trade 8 resolved: YES LOSS | PnL=$-588.14 | bal=$10831.96 | mom=-1.128%
 [2m2026-03-27T09:10:00.552685Z[0m [32m INFO[0m [2mbear_trader[0m[2m:[0m Candle 1774602300000 — 1h_mom=-1.162% taker=0.433 → YES | stake=$541.60 @ 0.505x | 1h mom -1.16% → mean reversion UP
+[2m2026-03-27T09:10:40.586675Z[0m [32m INFO[0m [2mbear_trader[0m[2m:[0m ✅ Trade 9 resolved: YES WIN | PnL=$514.63 | bal=$11346.59 | mom=-1.162%
+[2m2026-03-27T09:15:00.893343Z[0m [32m INFO[0m [2mbear_trader[0m[2m:[0m Candle 1774602600000 — 1h_mom=-1.032% taker=0.382 → YES | stake=$567.33 @ 0.505x | 1h mom -1.03% → mean reversion UP
+[2m2026-03-27T09:16:10.958496Z[0m [32m INFO[0m [2mbear_trader[0m[2m:[0m ✅ Trade 10 resolved: YES WIN | PnL=$539.08 | bal=$11885.67 | mom=-1.032%

@@ -94,8 +94,8 @@ async fn main() -> Result<()> {
     let mut current_odds: f64 = DEFAULT_ODDS;
     let mut bar_count = 0u32;
 
-    info!("BULL-ONLY 5M PAPER TRADER | entry> {:.2} | exit< {:.2} | lb={} | confirm={} | bal=${:.2}",
-        th.bull_ratio, th.exit_ratio, th.lookback, th.confirm_bars, tracker.kelly.balance);
+    info!("BULL-ONLY 5M PAPER TRADER | 1h mom < -{:.1}% | exit > -{:.1}% | bal=${:.2}",
+        th.mom_threshold, th.mom_threshold, tracker.kelly.balance);
 
     loop {
         if rx.changed().await.is_err() {
@@ -130,15 +130,15 @@ async fn main() -> Result<()> {
 
                 let t = candles.len() - 1;
                 let was_bull = in_bull;
-                let (still_bull, ratio, cb, ce) = decision::decision::evaluate(
+                let (still_bull, mom, cb, ce) = decision::decision::evaluate(
                     &candles, t, in_bull, consec_bull, consec_exit, &th,
                 );
 
                 if !was_bull && still_bull {
-                    info!("BULL ENTERED | ratio={:.3} consec={}", ratio, cb);
+                    info!("BULL ENTERED | mom={:.3}% consec={}", mom, cb);
                 }
                 if was_bull && !still_bull {
-                    info!("BULL EXITED | ratio={:.3} exit_consec={}", ratio, ce);
+                    info!("BULL EXITED | mom={:.3}%", mom);
                 }
 
                 in_bull = still_bull;
@@ -161,10 +161,10 @@ async fn main() -> Result<()> {
                     if stake > 0.01 {
                         tracker.record_bet(
                             next_block_open, next_block_open + 299_999,
-                            candle.close, "YES", Some(odds), ratio, stake,
+                            candle.close, "YES", Some(odds), mom, stake,
                         )?;
-                        info!("BET YES | block={} stake={:.2} odds={:.3} ratio={:.3}",
-                            next_block_open, stake, odds, ratio);
+                        info!("BET YES | block={} stake={:.2} odds={:.3} mom={:.3}%",
+                            next_block_open, stake, odds, mom);
                         current_stake = stake;
                         current_odds = odds;
                     } else {
@@ -210,7 +210,7 @@ fn simulate_5m(db: &Arc<Db>, tracker: &mut PaperTracker) -> Result<()> {
     let mut wins = 0u32;
 
     for t in eval_start..candles.len() - 1 {
-        let (still_bull, ratio, cb, ce) = decision::decision::evaluate(
+        let (still_bull, mom, cb, ce) = decision::decision::evaluate(
             &candles, t, in_bull, consec_bull, consec_exit, &th,
         );
         in_bull = still_bull;
@@ -223,7 +223,7 @@ fn simulate_5m(db: &Arc<Db>, tracker: &mut PaperTracker) -> Result<()> {
             if stake > 0.01 {
                 tracker.record_bet(
                     next.open_time, next.open_time + 299_999,
-                    candles[t].close, "YES", Some(DEFAULT_ODDS), ratio, stake,
+                    candles[t].close, "YES", Some(DEFAULT_ODDS), mom, stake,
                 )?;
                 match tracker.resolve_trade_by_block(
                     next.open_time, next.open, next.close, stake, DEFAULT_ODDS,
