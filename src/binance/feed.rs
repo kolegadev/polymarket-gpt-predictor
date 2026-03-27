@@ -9,6 +9,10 @@ use crate::decision::candle::Candle;
 use crate::db::Db;
 
 const BINANCE_WS: &str = "wss://stream.binance.us:9443/ws/btcusdt@kline_5m";
+const BINANCE_REST_KLINES: &str = "https://api.binance.us/api/v3/klines?symbol=BTCUSDT&interval=5m&limit=2";
+const WS_IDLE_TIMEOUT_SECS: u64 = 30;
+const REST_POLL_INTERVAL_SECS: u64 = 5;
+const MAX_WS_CONSECUTIVE_FAILURES: u32 = 3;
 
 /// Building candle from the websocket stream.
 #[derive(Debug, Clone, Default)]
@@ -76,16 +80,37 @@ pub async fn spawn_feed(
     tokio::spawn(async move {
         let mut building: Option<BuildingCandle> = None;
         let mut current_open_time: i64 = 0;
+        let mut ws_failures: u32 = 0;
 
         loop {
-            match connect_and_listen(&db, &mut building, &mut current_open_time, &tx).await {
-                Ok(()) => {
-                    warn!("Binance WS connection closed, reconnecting in 3s...");
-                    tokio::time::sleep(tokio::time::Duration::from_secs(3)).await;
+            if ws_failures < MAX_WS_CONSECUTIVE_FAILURES {
+                match connect_and_listen(&db, &mut building, &mut current_open_time, &tx).await {
+                    Ok(()) => {
+                        ws_failures += 1;
+                        warn!("Binance WS closed (failure #{}/{}), reconnecting in 3s...",
+                            ws_failures, MAX_WS_CONSECUTIVE_FAILURES);
+                        tokio::time::sleep(tokio::time::Duration::from_secs(3)).await;
+                    }
+                    Err(e) => {
+                        ws_failures += 1;
+                        warn!("Binance WS error (failure #{}/{}): {}, reconnecting in 3s...",
+                            ws_failures, MAX_WS_CONSECUTIVE_FAILURES, e);
+                        tokio::time::sleep(tokio::time::Duration::from_secs(3)).await;
+                    }
                 }
-                Err(e) => {
-                    warn!("Binance WS error: {}, reconnecting in 3s...", e);
-                    tokio::time::sleep(tokio::time::Duration::from_secs(3)).await;
+            } else {
+                warn!("WS failed {} times, switching to REST polling fallback...", ws_failures);
+                match rest_poll_loop(&db, &mut building, &mut current_open_time, &tx).await {
+                    Ok(()) => {
+                        // REST loop exited (e.g. recovered), reset failures and try WS again
+                        ws_failures = 0;
+                        info!("REST polling ended, attempting WS reconnect...");
+                        tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+                    }
+                    Err(e) => {
+                        warn!("REST polling error: {}, retrying in 5s...", e);
+                        tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
+                    }
                 }
             }
         }
@@ -132,7 +157,24 @@ async fn connect_and_listen(
     let (ws_stream, _) = connect_async(BINANCE_WS).await.context("WS connect failed")?;
     let (mut write, mut read) = ws_stream.split();
 
-    while let Some(msg) = read.next().await {
+    loop {
+        // Watchdog: if no message for 30s, force reconnect
+        let msg = tokio::select! {
+            m = read.next() => {
+                match m {
+                    Some(m) => m,
+                    None => {
+                        warn!("Binance WS stream ended, reconnecting...");
+                        break;
+                    }
+                }
+            }
+            _ = tokio::time::sleep(tokio::time::Duration::from_secs(30)) => {
+                warn!("Binance WS idle for 30s, forcing reconnect...");
+                break;
+            }
+        };
+
         let msg = msg?;
         if msg.is_ping() {
             write.send(Message::Pong(vec![].into())).await?;
@@ -220,6 +262,80 @@ async fn connect_and_listen(
     }
 
     Ok(())
+}
+
+/// REST polling fallback when websocket is unreliable.
+/// Polls Binance REST every REST_POLL_INTERVAL_SECS for new closed candles.
+async fn rest_poll_loop(
+    db: &Db,
+    building: &mut Option<BuildingCandle>,
+    current_open_time: &mut i64,
+    tx: &watch::Sender<Option<FeedEvent>>,
+) -> Result<()> {
+    info!("Starting REST polling fallback (every {}s)...", REST_POLL_INTERVAL_SECS);
+
+    loop {
+        let resp: Vec<Vec<serde_json::Value>> = match reqwest::get(BINANCE_REST_KLINES).await {
+            Ok(r) => r.json().await?,
+            Err(e) => {
+                warn!("REST poll error: {}", e);
+                tokio::time::sleep(tokio::time::Duration::from_secs(REST_POLL_INTERVAL_SECS)).await;
+                continue;
+            }
+        };
+
+        for row in &resp {
+            if row.len() < 10 { continue; }
+            let candle = Candle {
+                open_time: row[0].as_i64().unwrap_or(0),
+                close_time: row[6].as_i64().unwrap_or(0),
+                open: row[1].as_str().unwrap_or("0").parse().unwrap_or(0.0),
+                high: row[2].as_str().unwrap_or("0").parse().unwrap_or(0.0),
+                low: row[3].as_str().unwrap_or("0").parse().unwrap_or(0.0),
+                close: row[4].as_str().unwrap_or("0").parse().unwrap_or(0.0),
+                volume: row[5].as_str().unwrap_or("0").parse().unwrap_or(0.0),
+                taker_buy_vol: row[9].as_str().unwrap_or("0").parse().unwrap_or(0.0),
+                trades: row[8].as_u64().unwrap_or(0) as u32,
+            };
+
+            // New candle period detected — finalize the previous one
+            if candle.open_time > *current_open_time {
+                if let Some(b) = building.take() {
+                    let prev = Candle {
+                        open_time: b.open_time,
+                        close_time: b.open_time + 299999,
+                        open: b.open, high: b.high, low: b.low, close: b.close,
+                        volume: b.volume, taker_buy_vol: b.taker_buy_vol, trades: b.trades,
+                    };
+                    if let Err(e) = db.upsert_candle(&prev) {
+                        warn!("Failed to save candle: {}", e);
+                    }
+                    let _ = tx.send(Some(FeedEvent::Closed(prev.clone())));
+                    info!("Candle closed (REST): open_time={} close={:.2}", prev.open_time, prev.close);
+                }
+
+                *current_open_time = candle.open_time;
+                *building = Some(BuildingCandle {
+                    open_time: candle.open_time,
+                    open: candle.open, high: candle.high, low: candle.low,
+                    close: candle.close, volume: candle.volume,
+                    taker_buy_vol: candle.taker_buy_vol, trades: candle.trades,
+                });
+            } else if candle.open_time == *current_open_time {
+                // Update building candle with latest data
+                if let Some(b) = building.as_mut() {
+                    b.high = b.high.max(candle.high);
+                    b.low = if b.low == 0.0 { candle.low } else { b.low.min(candle.low) };
+                    b.close = candle.close;
+                    b.volume = candle.volume;
+                    b.taker_buy_vol = candle.taker_buy_vol;
+                    b.trades = candle.trades;
+                }
+            }
+        }
+
+        tokio::time::sleep(tokio::time::Duration::from_secs(REST_POLL_INTERVAL_SECS)).await;
+    }
 }
 
 

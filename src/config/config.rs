@@ -32,6 +32,22 @@ pub struct Args {
     #[arg(long)]
     pub summary: bool,
 
+    /// Reset account balance to $10,000 and exit
+    #[arg(long)]
+    pub reset: bool,
+
+    /// Research mode: run bear regime analysis on historical data
+    #[arg(long)]
+    pub research: bool,
+
+    /// Expand historical data (fetch more candles from Binance)
+    #[arg(long)]
+    pub expand_data: bool,
+
+    /// Run OBI collector (fetches order book snapshots every second)
+    #[arg(long)]
+    pub collect_obi: bool,
+
     /// Bet size in units (for PnL tracking)
     #[arg(long, default_value = "1.0")]
     pub bet_size: f64,

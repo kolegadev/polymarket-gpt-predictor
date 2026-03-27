@@ -16,3 +16,7 @@ tracing = "0.1"
 futures-util = "0.3"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 clap = { version = "4", features = ["derive"] }
+
+[[bin]]
+name = "bear_trader"
+path = "src/bear_trader.rs"

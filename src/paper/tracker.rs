@@ -61,9 +61,10 @@ pub struct PaperTracker {
 
 impl PaperTracker {
     pub fn new(db: Arc<Db>, starting_balance: f64) -> Self {
+        let balance = db.get_balance(starting_balance).unwrap_or(starting_balance);
         Self {
             db,
-            kelly: KellySizer::new(starting_balance, 0.05, 0.505),
+            kelly: KellySizer::new(balance, 0.05, 0.505),
         }
     }
 
@@ -138,6 +139,9 @@ impl PaperTracker {
             // Update Kelly balance
             self.kelly.settle(stake, won, odds);
 
+            // Persist balance to DB
+            let _ = self.db.set_balance(self.kelly.balance);
+
             info!(
                 "  {} open={:.2} close={:.2} risk=${:.2} pnl={:+.2} bal=${:.2}",
                 outcome, open_price, close_price, stake, pnl_units, self.kelly.balance,
@@ -168,6 +172,14 @@ impl PaperTracker {
         info!("  PnL/trade: ${:.4}", if total > 0 { total_pnl / total as f64 } else { 0.0 });
         info!("==================================================");
 
+        Ok(())
+    }
+
+    pub fn reset(&mut self, starting_balance: f64) -> Result<()> {
+        let new_balance = self.db.reset_balance(starting_balance)?;
+        self.kelly.balance = new_balance;
+        self.kelly.starting_balance = starting_balance;
+        info!("Balance reset to ${:.2}", new_balance);
         Ok(())
     }
 }

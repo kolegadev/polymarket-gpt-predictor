@@ -59,6 +59,12 @@ impl Db {
                 red_8 INTEGER
             );
 
+            CREATE TABLE IF NOT EXISTS account_state (
+                key TEXT PRIMARY KEY,
+                value REAL NOT NULL,
+                updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+            );
+
             CREATE INDEX IF NOT EXISTS idx_candles_close_time ON candles(close_time);
             CREATE INDEX IF NOT EXISTS idx_paper_trades_block ON paper_trades(block_open_time);
             CREATE INDEX IF NOT EXISTS idx_regime_block ON regime_snapshots(block_open_time);
@@ -194,6 +200,28 @@ impl Db {
                     s.spread_7_25, s.slope_25, s.close_pos, s.green_8, s.red_8],
         )?;
         Ok(())
+    }
+
+    pub fn get_balance(&self, default: f64) -> Result<f64> {
+        let conn = self.conn.lock().unwrap();
+        let balance: f64 = conn.query_row(
+            "SELECT value FROM account_state WHERE key = 'balance'", [], |r| r.get(0)
+        ).unwrap_or(default);
+        Ok(balance)
+    }
+
+    pub fn set_balance(&self, balance: f64) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT OR REPLACE INTO account_state (key, value, updated_at) VALUES ('balance', ?1, datetime('now'))",
+            params![balance],
+        )?;
+        Ok(())
+    }
+
+    pub fn reset_balance(&self, default: f64) -> Result<f64> {
+        self.set_balance(default)?;
+        Ok(default)
     }
 
     pub fn get_summary(&self) -> Result<(i64, i64, i64, i64, f64)> {

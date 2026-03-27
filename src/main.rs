@@ -1,3 +1,4 @@
+mod analysis;
 mod binance;
 mod clob;
 mod config;
@@ -40,6 +41,33 @@ async fn main() -> Result<()> {
 
     if args.summary {
         tracker.print_summary()?;
+        return Ok(());
+    }
+
+    if args.reset {
+        tracker.reset(STARTING_BALANCE)?;
+        tracker.print_summary()?;
+        return Ok(());
+    }
+
+    if args.research {
+        let candles = db.get_latest_candles(50000)?;
+        return analysis::bear_research::run_analysis(&candles);
+    }
+
+    if args.expand_data {
+        expand_historical_data(&db).await?;
+        return Ok(());
+    }
+
+    if args.collect_obi {
+        let db_clone = db.clone();
+        info!("Starting OBI collector (1s intervals)...");
+        let handle = binance::obi::spawn_collector(db_clone, 1);
+        // Run forever — the collector is a background task
+        tokio::signal::ctrl_c().await.ok();
+        info!("Shutting down OBI collector...");
+        handle.abort();
         return Ok(());
     }
 
@@ -250,3 +278,98 @@ async fn bootstrap_5m(db: &Arc<Db>) -> Result<()> {
     info!("DB: {} candles", db.get_latest_candles(10000)?.len());
     Ok(())
 }
+
+/// Expand historical data — paginate backwards as far as Binance.US allows.
+async fn expand_historical_data(db: &Arc<Db>) -> Result<()> {
+    // Get current earliest candle
+    let existing = db.get_latest_candles(50000)?;
+    let earliest = existing.first().map(|c| c.open_time).unwrap_or(0);
+
+    info!("Current DB: {} candles, earliest open_time={}", existing.len(), earliest);
+    if earliest == 0 {
+        anyhow::bail!("No existing candles");
+    }
+
+    let target_days = 40;
+    let target_earliest = earliest - (target_days * 86400000i64);
+
+    let mut end: i64 = earliest - 1;
+    let mut total_new = 0usize;
+    let mut page = 0;
+
+    loop {
+        let url = format!(
+            "https://api.binance.us/api/v3/klines?symbol=BTCUSDT&interval=5m&limit=1000&endTime={}",
+            end
+        );
+
+        page += 1;
+        info!("Page {}: fetching before {} ...", page, end);
+
+        let resp: Vec<Vec<serde_json::Value>> = match reqwest::get(&url).await {
+            Ok(r) => r.json().await?,
+            Err(e) => {
+                warn!("Page {} error: {}, stopping", page, e);
+                break;
+            }
+        };
+
+        if resp.is_empty() {
+            info!("Empty response, reached beginning of available data");
+            break;
+        }
+
+        let first_open = resp[0][0].as_i64().unwrap_or(0);
+        let last_open = resp.last().unwrap()[0].as_i64().unwrap_or(0);
+
+        let mut candles = Vec::new();
+        for r in &resp {
+            if r.len() < 10 { continue; }
+            candles.push(crate::decision::candle::Candle {
+                open_time: r[0].as_i64().unwrap_or(0),
+                close_time: r[6].as_i64().unwrap_or(0),
+                open: r[1].as_str().unwrap_or("0").parse().unwrap_or(0.0),
+                high: r[2].as_str().unwrap_or("0").parse().unwrap_or(0.0),
+                low: r[3].as_str().unwrap_or("0").parse().unwrap_or(0.0),
+                close: r[4].as_str().unwrap_or("0").parse().unwrap_or(0.0),
+                volume: r[5].as_str().unwrap_or("0").parse().unwrap_or(0.0),
+                taker_buy_vol: r[9].as_str().unwrap_or("0").parse().unwrap_or(0.0),
+                trades: r[8].as_u64().unwrap_or(0) as u32,
+            });
+        }
+
+        total_new += candles.len();
+        db.upsert_candles_batch(&candles)?;
+        info!("  Got {} candles ({} to {})", candles.len(), first_open, last_open);
+
+        if first_open <= target_earliest {
+            info!("Reached target of {} days, stopping", target_days);
+            break;
+        }
+
+        // Avoid hitting rate limits
+        tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
+        end = first_open - 1;
+
+        // Safety: don't paginate more than 50 pages
+        if page >= 50 {
+            warn!("Reached 50 pages, stopping");
+            break;
+        }
+    }
+
+    // Final count
+    let final_candles = db.get_latest_candles(100000)?;
+    let first_dt = chrono::DateTime::from_timestamp_millis(final_candles.first().unwrap().open_time)
+        .map(|d| d.format("%Y-%m-%d %H:%M UTC").to_string()).unwrap_or_default();
+    let last_dt = chrono::DateTime::from_timestamp_millis(final_candles.last().unwrap().open_time)
+        .map(|d| d.format("%Y-%m-%d %H:%M UTC").to_string()).unwrap_or_default();
+    let days = (final_candles.last().unwrap().open_time - final_candles.first().unwrap().open_time) as f64 / 86400000.0;
+
+    info!("DONE: {} new candles fetched across {} pages", total_new, page);
+    info!("DB now has {} candles ({:.1} days): {} to {}",
+        final_candles.len(), days, first_dt, last_dt);
+
+    Ok(())
+}
+
